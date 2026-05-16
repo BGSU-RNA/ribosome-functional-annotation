@@ -358,14 +358,16 @@ def test_rcsb_cache_avoids_second_http_call(
 
     api.annotate_pdb(FIXTURE_PDB_ID, cache=cache)
     assert routes["rcsb"].call_count == 1
-    assert routes["bgsu"].call_count == 7  # one per E. coli site
+    # Per-subunit BGSU batching: 1 call for the four SSU sites concatenated,
+    # 1 call for the three LSU sites concatenated.
+    assert routes["bgsu"].call_count == 2
     assert routes["coord"].call_count == 1
     assert routes["pdbe"].call_count == 1
 
     api.annotate_pdb(FIXTURE_PDB_ID, cache=cache)
     # All four caches should hit on the second call — no new HTTP traffic.
     assert routes["rcsb"].call_count == 1
-    assert routes["bgsu"].call_count == 7
+    assert routes["bgsu"].call_count == 2
     assert routes["coord"].call_count == 1
     assert routes["pdbe"].call_count == 1
 

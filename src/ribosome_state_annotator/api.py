@@ -313,12 +313,23 @@ def _annotate_one_assembly(
     # numbering convention (the dominant case for E. coli → another E. coli).
     chain_substitution = _build_chain_substitution(reference_units, by_role)
 
+    # Per-subunit batching: concatenate all SSU site anchors into one BGSU
+    # call and all LSU site anchors into another. The biological premise
+    # (these anchors are textbook conserved tRNA-interacting nucleotides:
+    # decoding-centre A1492/A1493, PTC G2252/G2253, etc.) is why the
+    # intersection-semantic risk of larger batches is acceptable here.
     correspondence_by_site: dict[str, CorrespondenceResult] = {}
-    for site_key, units in reference_units.items():
+    for subunit in ("ssu", "lsu"):
+        subunit_groups = {
+            key: list(units)
+            for key, units in reference_units.items()
+            if key.startswith(f"{subunit}_") and units
+        }
+        if not subunit_groups:
+            continue
         try:
-            result = _get_or_fetch_correspondence(
-                site_key,
-                list(units),
+            subunit_results = _get_or_fetch_subunit_correspondence(
+                subunit_groups,
                 target_pdb_id=pdb_id,
                 assembly_chains=assembly_chains_set,
                 chain_substitution=chain_substitution,
@@ -327,15 +338,19 @@ def _annotate_one_assembly(
             )
         except (ApiRequestError, CorrespondenceMappingError) as exc:
             logger.warning(
-                "correspondence fetch failed for %s site %s: %s",
+                "correspondence fetch failed for %s subunit %s: %s",
                 pdb_id,
-                site_key,
+                subunit,
                 exc,
             )
-            warnings.append(f"correspondence_fetch_failed_for_{site_key}")
+            # Mirror per-site warning shape so consumers don't have to
+            # know about the batched implementation detail.
+            for site_key in subunit_groups:
+                warnings.append(f"correspondence_fetch_failed_for_{site_key}")
             continue
-        correspondence_by_site[site_key] = result
-        warnings.extend(result.warnings)
+        for site_key, result in subunit_results.items():
+            correspondence_by_site[site_key] = result
+            warnings.extend(result.warnings)
 
     try:
         logger.info("loading coordinates for %s assembly %s", pdb_id, aid)
@@ -626,6 +641,102 @@ def _bgsu_cache_key(units: list[str], scope: str, resolution: str, depth: int) -
     deeper-depth request.
     """
     return f"units={','.join(units)}|scope={scope}|resolution={resolution}|depth={depth}"
+
+
+def _get_or_fetch_subunit_correspondence(
+    site_groups: Mapping[str, list[str]],
+    *,
+    target_pdb_id: str,
+    assembly_chains: set[str],
+    cache: Cache | None,
+    client: httpx.Client | None,
+    chain_substitution: dict[str, str] | None = None,
+    scope: str = DEFAULT_BGSU_SCOPE,
+    resolution: str = DEFAULT_BGSU_RESOLUTION,
+    depth: int = DEFAULT_BGSU_DEPTH,
+) -> dict[str, CorrespondenceResult]:
+    """Batched BGSU fetch for all sites in one subunit.
+
+    Concatenates every site's anchor units into a single BGSU
+    ``map_across_chains`` query, retrieves the response (cached on the
+    full union of unit IDs), and slices the parsed alignment back into
+    per-site :class:`CorrespondenceResult` objects so downstream
+    consumers see exactly the same per-site shape as the
+    unconsolidated path.
+
+    Two BGSU calls per cold-cache organism (SSU + LSU) instead of
+    seven. The biological premise — the anchor units are textbook
+    conserved tRNA-interacting nucleotides — is what makes the
+    larger-batch intersection-semantic risk acceptable. Anchors that
+    were empirically weakly-conserved have already been curated out
+    (e.g. yeast 25S position 2454; see REFERENCES.md and the spec
+    v3.1 addendum).
+
+    Returns a ``{site_key: CorrespondenceResult}`` dict with one entry
+    per non-empty key in ``site_groups``. An empty ``site_groups``
+    returns an empty dict.
+    """
+    site_unit_ranges: dict[str, tuple[int, int]] = {}
+    all_units: list[str] = []
+    for site_key, units in site_groups.items():
+        if not units:
+            continue
+        start = len(all_units)
+        all_units.extend(units)
+        site_unit_ranges[site_key] = (start, len(all_units))
+
+    if not all_units:
+        return {
+            site_key: CorrespondenceResult(reference_key=site_key)
+            for site_key in site_groups
+        }
+
+    cache_key = _bgsu_cache_key(all_units, scope, resolution, depth)
+    raw: dict[str, list[str]] | None = None
+    if cache is not None:
+        cached_payload = cache.get_bgsu_payload(cache_key)
+        if cached_payload is not None:
+            logger.debug("bgsu cache hit for subunit batch (%d units)", len(all_units))
+            raw = _ensure_alignment_dict(cached_payload)
+
+    if raw is None:
+        logger.info(
+            "fetching BGSU correspondence for subunit batch (%d units, %d sites)",
+            len(all_units),
+            len(site_unit_ranges),
+        )
+        raw = fetch_correspondence(
+            all_units, scope=scope, resolution=resolution, depth=depth, client=client
+        )
+        if cache is not None:
+            alignment_payload = {
+                "alignment": [
+                    {"reference_unit": ref, "mapped_units": list(mapped)}
+                    for ref, mapped in raw.items()
+                ]
+            }
+            cache.put_bgsu_payload(cache_key, alignment_payload)
+
+    # Slice the union response back into per-site CorrespondenceResults.
+    # The per-site §5.2.2 filter, chain-substitution fallback, and
+    # missing-anchor warnings are preserved unchanged by routing each
+    # site's slice through build_correspondence_result.
+    results: dict[str, CorrespondenceResult] = {}
+    for site_key, units in site_groups.items():
+        if not units:
+            results[site_key] = CorrespondenceResult(reference_key=site_key)
+            continue
+        site_units_list = list(units)
+        site_raw = {unit: list(raw.get(unit, [])) for unit in site_units_list}
+        results[site_key] = build_correspondence_result(
+            site_key,
+            site_units_list,
+            site_raw,
+            target_pdb_id=target_pdb_id,
+            assembly_chains=assembly_chains,
+            chain_substitution=chain_substitution,
+        )
+    return results
 
 
 def _get_or_fetch_correspondence(
