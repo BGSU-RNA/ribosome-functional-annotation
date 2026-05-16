@@ -77,9 +77,11 @@ class TRNAStates(BaseModel):
     State strings have the form ``"<SSU>/<LSU>"`` for A-tRNA / P-tRNA and
     are exactly ``"E/E"`` for E-tRNA when assigned. The LSU half can be a
     canonical token (``"A"``, ``"P"``, ``"AP"``, ``"E"``, ``"PE"``, ``"*"``,
-    ``"**"``) or the raw ``pdbx_description`` of a protein factor near
-    the tRNA's CCA end (§12.4) — the spec deliberately keeps the latter
-    free-text rather than mapping to canonical tokens.
+    ``"**"``) or the name of a protein factor near the tRNA's CCA end
+    (§12.4) — preferring the chain's ``uniprot_name`` (canonical
+    cross-deposit identifier) and falling back to ``pdbx_description``
+    when no UniProt name is available. The spec deliberately keeps the
+    latter free-text rather than mapping to canonical tokens.
     """
 
     aminoacyl_trna_state: str | None = None
@@ -440,8 +442,13 @@ def _resolve_lsu_state(
     factor_chain, factor_distance = factor
     evidence[f"{evidence_prefix}_factor_chain"] = factor_chain.ife
     evidence[f"{evidence_prefix}_factor_description"] = factor_chain.description
+    evidence[f"{evidence_prefix}_factor_uniprot_name"] = factor_chain.uniprot_name
     evidence[f"{evidence_prefix}_factor_distance"] = factor_distance
-    return factor_chain.description or "*"
+    # Prefer the UniProt protein name in the state label — it is the
+    # canonical cross-deposit identifier and is more stable than the
+    # pdbx_description (which often carries copy suffixes like "Tu 2").
+    # Fall back to pdbx_description, then to "*" when neither is set.
+    return factor_chain.uniprot_name or factor_chain.description or "*"
 
 
 # ---------------------------------------------------------------------------
