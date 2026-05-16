@@ -1,0 +1,32 @@
+# Python build / install artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local annotator caches (spec §17)
+.cache/
+~/.cache/ribosome-state-annotator/
