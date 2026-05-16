@@ -22,10 +22,34 @@ formation, translocation, termination, and recycling — each
 characterised by a specific arrangement of mRNA, transfer RNAs, and
 auxiliary protein factors (e.g. EF-Tu, EF-G, RF1/2, RRF) bound to the
 small (SSU) and large (LSU) subunits. The three tRNA binding sites —
-**A** (aminoacyl), **P** (peptidyl), and **E** (exit) — and the
-*classical* vs *hybrid* configurations of bound tRNAs (`A/A`, `P/P`,
-`P/E`, `ap/AP`, …) act as a fingerprint for where in the elongation
-cycle a given structure was captured.
+**A** (aminoacyl), **P** (peptidyl), and **E** (exit) — act as a
+fingerprint for where in the elongation cycle a given structure was
+captured.
+
+A tRNA's functional state is reported as `<SSU>/<LSU>` — its contact
+with the small-subunit site followed by its contact with the
+large-subunit site:
+
+- **Classical states** (`A/A`, `P/P`, `E/E`) — the tRNA occupies the
+  same site on both subunits. These are the stable resting positions
+  before and after each round of elongation.
+- **Hybrid states** (`A/P`, `P/E`) — after peptide-bond formation but
+  before translocation, the acceptor end of each tRNA spontaneously
+  swings into the next LSU site while the anticodon end stays put on
+  the SSU. Hybrid configurations are direct evidence of a
+  post-peptidyl-transfer, pre-translocation intermediate.
+- **Chimeric / intermediate states** (lowercase letters, e.g.
+  `ap/AP`) — the tRNA simultaneously contacts two adjacent sites,
+  catching it mid-translocation. Lowercase signals partial contact;
+  uppercase signals full contact.
+- **Factor-bound A-site** (`A/Elongation factor Tu`,
+  `A/Release factor 1`, …) — when the A-tRNA's CCA end is held by a
+  protein factor rather than docked into the LSU peptidyl-transferase
+  centre, the LSU half of the label is replaced by the factor's name.
+  Typical of decoding-state ternary complexes (EF-Tu·GTP·aa-tRNA) and
+  termination complexes.
+- **`*` and `**`** — `*` means no contact was found at that subunit;
+  `**` means contact was found but couldn't be labelled.
 
 The PDB now contains thousands of ribosome structures spanning
 bacteria, archaea, and eukaryotes (cytoplasmic and organellar). Chain
@@ -55,10 +79,10 @@ exploits that conservation:
    physically contact each set of projected anchors.
 4. **Assign + label.** The contacting chains become the mRNA / A-tRNA
    / P-tRNA / E-tRNA assignments. The SSU/LSU contact pattern for
-   each tRNA determines its functional state (`A/A`, `ap/AP`,
-   `A/Elongation factor Tu`, …), and a neighbour search around the
-   A-tRNA's CCA end identifies the bound elongation/release factor
-   when one is present.
+   each tRNA determines its functional state (classical, hybrid, or
+   chimeric — see vocabulary above), and a neighbour search around
+   the A-tRNA's CCA end identifies the bound elongation/release
+   factor when one is present.
 
 This is the **contact-transfer annotation** workflow: instead of
 relying on chain names or sequence-only heuristics, the package
