@@ -35,6 +35,56 @@ two key papers:
   intermediate (PDB **4W29** is the canonical structure of this
   state).
 
+## Factor-bound tRNA states
+
+The §12.4 protein-factor LSU label (a tRNA's CCA end held by a
+non-ribosomal protein rather than docked into a canonical LSU site)
+applies symmetrically to both A- and P-site tRNAs. Canonical
+biological examples:
+
+### A-site factor binding (elongation, termination)
+
+- **EF-Tu·GTP·aa-tRNA decoding complex** — *Schmeing et al.*,
+  *The crystal structure of the ribosome bound to EF-Tu and aminoacyl-tRNA*,
+  *Science* **326**, 688–694 (2009). DOI:
+  [10.1126/science.1179700](https://doi.org/10.1126/science.1179700).
+  EF-Tu's domain II contacts the acceptor stem of the A-site
+  aminoacyl-tRNA during codon decoding.
+- **eEF1A·GTP·aa-tRNA** (eukaryotic homolog) — *Shao et al.*,
+  *Decoding mammalian ribosome–mRNA states by translational GTPase
+  complexes*, *Cell* **167**, 1229–1240 (2016). DOI:
+  [10.1016/j.cell.2016.10.046](https://doi.org/10.1016/j.cell.2016.10.046).
+- **Termination complexes** with release factors (RF1/RF2 in bacteria,
+  eRF1·eRF3 in eukaryotes) contact the A-site tRNA region.
+
+### P-site factor binding (initiation)
+
+- **Initiation factor IF2 + initiator fMet-tRNAfMet** — *Sprink, Ramrath
+  et al.*, *Structures of ribosome-bound initiation factor 2 reveal the
+  mechanism of subunit association*, *Science Advances* **2**, e1501502
+  (2016). DOI:
+  [10.1126/sciadv.1501502](https://doi.org/10.1126/sciadv.1501502).
+  Bacterial IF2's C-terminal domain (C2) latches onto the acceptor stem
+  of the initiator tRNA at the P site. Canonical structure: PDB **1ZO1**
+  (Allen et al. *Cell* 2005, E. coli 70S initiation complex).
+- **Compact IF2 gating P-site accommodation** — *Basu, Yusupova et al.*,
+  *Compact IF2 allows initiator tRNA accommodation into the P site and
+  gates the ribosome to elongation*, *Nature Communications* **13**,
+  3388 (2022). DOI:
+  [10.1038/s41467-022-31129-2](https://doi.org/10.1038/s41467-022-31129-2).
+- **eIF5B + Met-tRNAi (eukaryotic homolog)** — *Wang et al.*, *eIF5B
+  and eIF1A reorient initiator tRNA to allow ribosomal subunit
+  joining*, *Nature* **607**, 165–170 (2022). DOI:
+  [10.1038/s41586-022-04858-z](https://doi.org/10.1038/s41586-022-04858-z).
+  Domain IV of eIF5B forms extensive contacts with the methionylated
+  3′ CCA end of the initiator tRNA, stabilising a non-canonical P/I
+  orientation prior to GTP hydrolysis.
+- **80S–eIF5B initiation→elongation transition** — *Lapointe et al.*,
+  *Structural basis for the transition from translation initiation to
+  elongation by an 80S-eIF5B complex*, *Nature Communications* **11**,
+  4839 (2020). DOI:
+  [10.1038/s41467-020-18829-3](https://doi.org/10.1038/s41467-020-18829-3).
+
 ## Ribosomal-protein nomenclature
 
 - **Ban, N., Beckmann, R., Cate, J. H. D., Dinman, J. D., Dragon, F.,

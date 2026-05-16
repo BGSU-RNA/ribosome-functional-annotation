@@ -48,12 +48,18 @@ large-subunit site:
   carry doubled letters: `ap/A` is chimeric on the SSU only;
   `ap/AP` is fully chimeric on both subunits — the definitive
   EF-G-trapped translocation intermediate.
-- **Factor-bound A-site** (`A/Elongation factor Tu`,
-  `A/Release factor 1`, …) — when the A-tRNA's CCA end is held by a
-  protein factor rather than docked into the LSU peptidyl-transferase
-  centre, the LSU half of the label is replaced by the factor's name.
-  Typical of decoding-state ternary complexes (EF-Tu·GTP·aa-tRNA) and
-  termination complexes.
+- **Factor-bound tRNA at LSU** (e.g. `A/Elongation factor Tu`,
+  `A/Release factor 1`, `P/Initiation factor IF-2`,
+  `P/Eukaryotic translation initiation factor 5B`) — when a tRNA's
+  CCA end is held by a non-ribosomal protein factor rather than
+  docked into a canonical LSU site, the LSU half of the label is
+  replaced by that factor's name. Applies symmetrically to both A-
+  and P-site tRNAs: A-side captures EF-Tu·GTP ternary complexes
+  (decoding), eEF1A complexes, and termination complexes (RF1/2/3,
+  eRF1/3); P-side captures initiation complexes where IF2 (bacteria)
+  or eIF5B (eukaryotes) latches onto the acceptor stem of the
+  initiator tRNA. See [`REFERENCES.md`](./REFERENCES.md) for the
+  canonical structures.
 - **Missing-contact placeholders** — `*` means no contact was found at
   that subunit; `**` means contact was found but couldn't be labelled
   (typically a tRNA anticodon-stem-loop fragment too short to disambiguate).

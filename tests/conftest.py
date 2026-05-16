@@ -189,9 +189,13 @@ def build_ribosome_fixture() -> gemmi.Structure:
     - ``ASL`` (anticodon-stem-loop fragment, 20 nts only — under
       :data:`constants.ASL_FRAGMENT_MAX_LENGTH`). Sits far from
       everything; used to exercise the ``"**"`` state branch.
-    - ``EFTU`` (translation factor, single protein residue, near TA's
+    - ``EFTU`` (elongation factor Tu, single protein residue, near TA's
       CCA-end residue 76). Used to exercise the §12.4 protein-factor
-      label branch.
+      label branch on the A-tRNA side.
+    - ``IF2`` (initiation factor 2, single protein residue, near TP's
+      CCA-end residue 76). Used to exercise the §12.4 protein-factor
+      label branch on the P-tRNA side. Sits 20 Å from EFTU so it
+      can't be picked up by the A-tRNA factor search.
     - ``L1`` (ribosomal protein, single protein residue, also near TA's
       CCA-end). The §12.4 algorithm must exclude this chain because the
       caller passes a ChainRef with ``is_ribosomal_protein=True``.
@@ -255,11 +259,22 @@ def build_ribosome_fixture() -> gemmi.Structure:
     asl_residues = [("A", i, (200.0 + i, 0.0, 0.0)) for i in range(1, 21)]
     model.add_chain(_make_chain("ASL", asl_residues))
 
-    # Factor protein (one residue) sitting 0.5 Å from A-tRNA's CCA-end
-    # residue 76. Tests can swap A-tRNA into a "no LSU contact" geometry
-    # by removing the L/20 anchor; the §12.4 rule should then pick EFTU.
+    # Elongation factor Tu: one residue 0.5 Å from A-tRNA's CCA-end
+    # residue 76 at (20.5, 20.0, 0.0). Tests can swap A-tRNA into a
+    # "no LSU contact" geometry by removing the L/20 anchor; the §12.4
+    # rule should then pick EFTU and produce the "A/Elongation factor Tu"
+    # state.
     eftu_residues = [("ALA", 1, (21.0, 20.0, 0.0))]
     model.add_chain(_make_chain("EFTU", eftu_residues))
+
+    # Initiation factor 2: one residue 0.5 Å from P-tRNA's CCA-end
+    # residue 76 at (40.5, 20.0, 0.0). Mirrors EFTU for the P-tRNA
+    # factor-label path — biologically the P-site case is the
+    # IF2 / eIF5B initiator-tRNA configuration (initiation factors
+    # latching the acceptor stem of the initiator tRNA at the P site;
+    # see REFERENCES.md for the canonical structures).
+    if2_residues = [("ALA", 1, (41.0, 20.0, 0.0))]
+    model.add_chain(_make_chain("IF2", if2_residues))
 
     # Ribosomal protein L1: also near A-tRNA's CCA-end (so it would win the
     # "minimum distance" race if not excluded). Tests pass

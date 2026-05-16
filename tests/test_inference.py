@@ -89,6 +89,12 @@ def _build_ribosome_inputs() -> tuple[
         description="Elongation factor Tu",
         is_ribosomal_protein=False,
     )
+    if2 = _chain(
+        "IF2",
+        polymer_type="Protein",
+        description="Initiation factor IF-2",
+        is_ribosomal_protein=False,
+    )
     l1 = _chain(
         "L1",
         polymer_type="Protein",
@@ -98,7 +104,7 @@ def _build_ribosome_inputs() -> tuple[
 
     assembly = _assembly(
         rna_chains=[s_chain, l_chain, mrna, atrna, ptrna, etrna, asl],
-        protein_chains=[eftu, l1],
+        protein_chains=[eftu, if2, l1],
     )
     by_role: dict[str, list[ChainRef]] = {
         "ssu_main_rrna": [s_chain],
@@ -304,6 +310,31 @@ def test_atrna_factor_search_excludes_ribosomal_proteins(
     states = infer.compute_trna_states(ribosome_fixture, assembly, assignments, correspondence)
     # If L1 had been picked the state would be "A/50S ribosomal protein L1".
     assert states.aminoacyl_trna_state == "A/Elongation factor Tu"
+
+
+def test_ptrna_factor_label_when_no_LSU_contact(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """The §12.4 factor search is generic — it must also produce a
+    factor label for the P-tRNA, not just the A-tRNA. Biologically this
+    is the IF2 / eIF5B initiator-tRNA configuration during initiation,
+    where an initiation factor latches the acceptor stem of the P-site
+    tRNA. Here we drop the LSU ptrna + lsu_etrna anchors so the P-tRNA
+    contacts neither LSU site, and assert the IF2 chain near TP's CCA
+    end produces the "P/Initiation factor IF-2" state."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    correspondence["lsu_ptrna"] = _correspondence("lsu_ptrna", [])
+    correspondence["lsu_etrna"] = _correspondence("lsu_etrna", [])
+    assignments = infer.assign_functional_chains(
+        ribosome_fixture, assembly, by_role, correspondence
+    )
+    states = infer.compute_trna_states(ribosome_fixture, assembly, assignments, correspondence)
+    assert states.peptidyl_trna_state == "P/Initiation factor IF-2"
+    # Evidence dict carries chain IFE, raw description, and distance — same
+    # field shape as the aminoacyl_trna_factor_* keys.
+    assert states.trna_state_evidence["peptidyl_trna_factor_chain"] == "RIBOFIXTURE|1|IF2"
+    assert states.trna_state_evidence["peptidyl_trna_factor_description"] == "Initiation factor IF-2"
+    assert states.trna_state_evidence["peptidyl_trna_factor_distance"] > 0.0
 
 
 def test_atrna_factor_star_when_no_qualifying_protein(
