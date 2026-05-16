@@ -13,18 +13,57 @@ for the full design.
 
 ## Short summary
 
-Given a PDB ID, the package pulls entry metadata from RCSB GraphQL
-(augmented with PDBe REST Rfam mappings for rRNA chains), classifies
-the assembly as bacterial / eukaryotic / eukaryotic-organellar, and
-projects curated **functional-site anchor nucleotides** from a
-reference ribosome (*E. coli* 5J7L for bacterial / organellar, yeast
-7ZW0 for eukaryotic cytoplasmic) onto the query via BGSU correspondence.
-It then downloads the biological-assembly mmCIF and uses Gemmi to find
-which chains in the query physically contact those mapped anchors —
-giving the mRNA / A-tRNA / P-tRNA / E-tRNA assignments and the SSU/LSU
-contact pattern that determines the tRNA functional state (`A/A`,
-`ap/AP`, `A/Elongation factor Tu`, etc.). This is the
-"contact-transfer annotation" workflow.
+### Biological context
+
+The ribosome is the macromolecular machine that translates messenger
+RNA into protein. During translation it cycles through structurally
+distinct functional states — initiation, decoding, peptide-bond
+formation, translocation, termination, and recycling — each
+characterised by a specific arrangement of mRNA, transfer RNAs, and
+auxiliary protein factors (e.g. EF-Tu, EF-G, RF1/2, RRF) bound to the
+small (SSU) and large (LSU) subunits. The three tRNA binding sites —
+**A** (aminoacyl), **P** (peptidyl), and **E** (exit) — and the
+*classical* vs *hybrid* configurations of bound tRNAs (`A/A`, `P/P`,
+`P/E`, `ap/AP`, …) act as a fingerprint for where in the elongation
+cycle a given structure was captured.
+
+The PDB now contains thousands of ribosome structures spanning
+bacteria, archaea, and eukaryotes (cytoplasmic and organellar). Chain
+naming conventions vary widely across deposits, and identifying which
+chain is the A-site tRNA vs the P-site tRNA vs the mRNA from a raw
+mmCIF is non-trivial. This package automates that annotation.
+
+### How the package does it
+
+Functional-site nucleotides on the rRNA — the residues that directly
+contact mRNA, A-tRNA, P-tRNA, and E-tRNA — are among the most
+phylogenetically conserved positions in all of biology. The package
+exploits that conservation:
+
+1. **Fetch + classify.** Pull entry metadata from RCSB GraphQL
+   (augmented with PDBe REST Rfam mappings for rRNA chains) and
+   classify the assembly as bacterial, eukaryotic cytoplasmic, or
+   eukaryotic organellar.
+2. **Project reference anchors.** Curated functional-site nucleotides
+   from a reference ribosome (*E. coli* 5J7L for bacterial /
+   organellar, yeast 7ZW0 for eukaryotic cytoplasmic) are mapped onto
+   the query's rRNA via BGSU's RNA correspondence API, which uses
+   Rfam-based covariance alignments to find evolutionarily equivalent
+   positions even across distant organisms.
+3. **Detect contacts.** Download the biological-assembly mmCIF and use
+   Gemmi neighbour search to find which chains in the query
+   physically contact each set of projected anchors.
+4. **Assign + label.** The contacting chains become the mRNA / A-tRNA
+   / P-tRNA / E-tRNA assignments. The SSU/LSU contact pattern for
+   each tRNA determines its functional state (`A/A`, `ap/AP`,
+   `A/Elongation factor Tu`, …), and a neighbour search around the
+   A-tRNA's CCA end identifies the bound elongation/release factor
+   when one is present.
+
+This is the **contact-transfer annotation** workflow: instead of
+relying on chain names or sequence-only heuristics, the package
+transfers functional identity through three-dimensional contacts to
+conserved positions.
 
 ## Workflow
 
