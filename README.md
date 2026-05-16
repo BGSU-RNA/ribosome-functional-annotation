@@ -24,8 +24,7 @@ which chains in the query physically contact those mapped anchors —
 giving the mRNA / A-tRNA / P-tRNA / E-tRNA assignments and the SSU/LSU
 contact pattern that determines the tRNA functional state (`A/A`,
 `ap/AP`, `A/Elongation factor Tu`, etc.). This is the
-"contact-transfer annotation" workflow — spec §3.3 has the long
-version.
+"contact-transfer annotation" workflow.
 
 ## Workflow
 
@@ -40,18 +39,18 @@ version.
         └────────────┬──────────────────────────────────────┘
                      ▼
         ┌───────────────────────────────────────────────────┐
-        │  Classify (§7, §8)                                │
+        │  Classify                                         │
         │  rRNA core + ribosomal-protein superkingdom vote  │
         │  → bacterial / eukaryotic / organellar / skip     │
         └────────────┬──────────────────────────────────────┘
                      ▼
         ┌───────────────────────────────────────────────────┐
-        │  Pick reference (§6.4)                            │
+        │  Pick reference                                   │
         │  5J7L (bacterial/organellar) or 7ZW0 (eukaryotic) │
         └────────────┬──────────────────────────────────────┘
                      ▼
         ┌───────────────────────────────────────────────────┐
-        │  BGSU correspondence (§5.2)                       │
+        │  BGSU correspondence                              │
         │  reference anchors → query-PDB equivalent units   │
         │  per-assembly chain-substitution fallback applied │
         └────────────┬──────────────────────────────────────┘
@@ -62,9 +61,9 @@ version.
         └────────────┬──────────────────────────────────────┘
                      ▼
         ┌───────────────────────────────────────────────────┐
-        │  Assign mRNA / A-tRNA / P-tRNA / E-tRNA (§11)     │
-        │  Infer tRNA states (§12)                          │
-        │  Label A-site factor by CCA-end neighbour (§12.4) │
+        │  Assign mRNA / A-tRNA / P-tRNA / E-tRNA            │
+        │  Infer tRNA states                                │
+        │  Label A-site factor by CCA-end neighbour         │
         └────────────┬──────────────────────────────────────┘
                      ▼
         ┌───────────────────────────────────────────────────┐
@@ -172,8 +171,7 @@ results = annotate_many(["5J7L", "5TBW", "6ZMI"], continue_on_error=True)
 ```
 
 Each result is a `RibosomeAnnotation` Pydantic model — see
-`src/ribosome_state_annotator/models.py` (or spec §9.1) for the full
-field list. The role-based rRNA outputs (`ssu_main_rrna_chains` etc.)
+`src/ribosome_state_annotator/models.py` for the full field list. The role-based rRNA outputs (`ssu_main_rrna_chains` etc.)
 are canonical; `ssu_chain` and `lsu_chain` are convenience aliases that
 resolve to `None` whenever the underlying list isn't exactly one entry.
 
@@ -190,14 +188,14 @@ write_chain_csv(annotations, Path("chain.csv"))
 
 | Format | When emitted | Notes |
 |--------|--------------|-------|
-| JSON | Default, or `--output foo.json` | Full `RibosomeAnnotation` list. Field layout in spec §15.1 and `models.py`. |
+| JSON | Default, or `--output foo.json` | Full `RibosomeAnnotation` list. Field layout in `models.py`. |
 | JSONL | `--output foo.jsonl` | One annotation per line. For streaming consumers. |
-| `ribosome_chain_annotation.csv` | Default companion (suppress with `--no-csv`) | One row per annotated assembly, 13 columns. Matches the legacy prototype byte-for-byte (spec §15.3). |
+| `ribosome_chain_annotation.csv` | Default companion (suppress with `--no-csv`) | One row per annotated assembly, 13 columns. Matches the legacy prototype byte-for-byte. |
 | `ribosome_assembly_annotation.csv` | Default companion | One row per `(property, value)` tuple: species, non-ribosomal proteins, bound ligands, unmapped RNA chains, plus v1 extensions (classification, superkingdom, warnings). |
 
 Skipped and failed annotations appear in JSON but are omitted from CSV.
 
-## Known limitations (spec §13.1 + §3.2)
+## Known limitations
 
 Behaviours v1 accepts but you should know about:
 
@@ -206,19 +204,19 @@ Behaviours v1 accepts but you should know about:
   - A false positive: `"ribosomal recycling factor"` contains the
     substring and gets flagged. Acceptable in v1 because RRF's
     geometry near the CCA end is similar enough that excluding it from
-    the §12.4 factor search doesn't lose anything important.
+    the factor search doesn't lose anything important.
   - A false negative: chains named just `"S1"` / `"L11"` without the
     `"ribosomal"` substring are missed. Rare in modern PDB depositions;
-    common in older entries. The §8.4 broader rule (used only for the
-    superkingdom vote) catches these via an anchored regex, but the
-    `is_ribosomal_protein` flag used by §12.4 stays on the narrow rule.
-- The allow-list / deny-list overrides documented in spec §13.1
+    common in older entries. The broader superkingdom-vote rule catches
+    these via an anchored regex, but the `is_ribosomal_protein` flag
+    used by the factor search stays on the narrow rule.
+- The allow-list / deny-list overrides for ribosomal-protein detection
   (`extra_ribosomal_descriptions`, `non_ribosomal_overrides`) are NOT
   exposed in the v1 API. Workaround: rebuild the `ChainRef`s with
   edited `is_ribosomal_protein` flags before passing them to the
   inference layer.
 
-v1 out-of-scope (spec §3.2):
+v1 out-of-scope:
 
 - Archaeal ribosomes (skipped with `archaeal_ribosome_not_supported`).
 - Ribosome fragments and partial assemblies missing either SSU or LSU.
@@ -234,8 +232,7 @@ Every external call is cached on disk at
 `~/.cache/ribosome-state-annotator/` (override with `--cache-dir`,
 disable with `--no-cache`). Four namespaces: `rcsb/`, `bgsu/`, `pdbe/`,
 `coords/`. The cache is content-addressed and never expires — to
-refresh, use `ribostate cache clear` or delete the cache root. See spec
-§17 for the key format.
+refresh, use `ribostate cache clear` or delete the cache root.
 
 ## Package layout
 
@@ -247,24 +244,23 @@ of the contact-transfer workflow above.
 | `api.py` | Top-level orchestration. `annotate_pdb` / `annotate_assembly` / `annotate_many` live here; this is the file most library callers reach for. |
 | `cli.py` | Typer CLI (`ribostate annotate`, `…-batch`, `cache`). Thin wrapper over `api.py`. |
 | `models.py` | Pydantic v2 models: `ChainRef`, `LigandRef`, `AssemblyContext`, `CorrespondenceResult`, `RibosomeAnnotation`. All JSON / CSV output round-trips through these. |
-| `constants.py` | Curated reference unit IDs (`BACTERIAL_REFERENCE_UNITS` for 5J7L, `YEAST_REFERENCE_UNITS` for 7ZW0). The curated functional-site anchors of §6.3. |
+| `constants.py` | Curated reference unit IDs (`BACTERIAL_REFERENCE_UNITS` for 5J7L, `YEAST_REFERENCE_UNITS` for 7ZW0) — the functional-site anchors. |
 | `rcsb_client.py` | RCSB GraphQL fetcher + assembly parser. Reads `assemblies → polymer_entity_instances` and produces per-assembly `AssemblyContext` records. |
-| `pdbe_client.py` | PDBe REST Rfam-mappings fetcher. Augments rRNA chains with Rfam accessions RCSB no longer ships (spec §5.3). |
-| `bgsu_client.py` | BGSU correspondence HTTP client + tolerant JSON parser. Handles `format=json`, `depth=700`, and the live `mappings` / spec `alignment` response shapes (spec §5.2, §28.2). |
-| `correspondence.py` | §5.2.2 PDB-prefix + assembly-chain filter, and the multi-assembly chain-substitution fallback (§28.2). |
+| `pdbe_client.py` | PDBe REST Rfam-mappings fetcher. Augments rRNA chains with Rfam accessions RCSB no longer ships. |
+| `bgsu_client.py` | BGSU correspondence HTTP client + tolerant JSON parser. Handles the live `mappings` and idealised `alignment` response shapes. |
+| `correspondence.py` | PDB-prefix + assembly-chain filter, plus the multi-assembly chain-substitution fallback. |
 | `coordinates.py` | mmCIF download + Gemmi parsing. Caches under `coords/`. |
-| `gemmi_contacts.py` | Gemmi `NeighborSearch` wrapper restricted to the active assembly (§10). |
-| `classify.py` | rRNA-core determination, ribosomal-protein detection, dominant-superkingdom vote, final classification rule (§8). |
-| `infer.py` | Functional chain assignment + tRNA-state inference (§11, §12). Owns the polymer-filtered CCA-end selector for §12.4. |
+| `gemmi_contacts.py` | Gemmi `NeighborSearch` wrapper restricted to the active assembly. |
+| `classify.py` | rRNA-core determination, ribosomal-protein detection, dominant-superkingdom vote, final classification rule. |
+| `infer.py` | Functional chain assignment + tRNA-state inference. Owns the polymer-filtered CCA-end selector for the A-site factor label. |
 | `cache.py` | Content-addressed on-disk cache with four namespaces: `rcsb/`, `bgsu/`, `pdbe/`, `coords/`. |
 | `config.py` | Tunables: contact cutoff, completeness thresholds, network timeouts. |
 | `exceptions.py` | Typed exception hierarchy (`ApiRequestError`, `CorrespondenceMappingError`, `CoordinateDownloadError`, …). |
-| `output.py` | JSON / JSONL / CSV writers (spec §15). |
+| `output.py` | JSON / JSONL / CSV writers. |
 
-Spec sections referenced above all live in
-[`ribosome_functional_annotation_package_spec_v3.md`](./ribosome_functional_annotation_package_spec_v3.md);
-§28 in that document is the v3.1 addendum consolidating every place the
-implementation diverges from the original spec body.
+For the full design rationale, classification rules, output schemas,
+and the v3.1 live-API addendum, see
+[`ribosome_functional_annotation_package_spec_v3.md`](./ribosome_functional_annotation_package_spec_v3.md).
 
 ## Development
 
@@ -280,7 +276,7 @@ pytest -m network       # opt in to live RCSB + BGSU + PDBe tests
 The integration tests under `tests/integration/` hit the live
 RCSB / BGSU / PDBe APIs and download mmCIF files; they're excluded from
 the default `pytest` run. See `tests/fixtures/acceptance_set.md` for
-the PDB IDs the spec §25.1 acceptance tests use.
+the PDB IDs used by the acceptance tests.
 
 ## Contributors
 
