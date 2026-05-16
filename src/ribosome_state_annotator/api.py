@@ -419,10 +419,19 @@ def _build_annotated_annotation(
     states: TRNAStates,
     warnings: list[str],
 ) -> RibosomeAnnotation:
-    # Compute other_rna_chains: RNA chains that weren't placed in any role
-    # AND weren't subsequently assigned as mRNA / A-tRNA / P-tRNA / E-tRNA.
+    # Compute other_rna_chains: RNA chains that weren't placed in any
+    # OUTPUT bucket (rRNA roles + the four functional-chain slots).
+    #
+    # The "trna" partition bucket is intentionally NOT in this exclusion
+    # list — it's an intermediate internal classification used by the
+    # mRNA-pool exclusion in assign_functional_chains. A chain in the
+    # trna bucket that doesn't get assigned to A/P/E by contact transfer
+    # (e.g. mt-tRNA-Val in 3J9M, which sits at the central protuberance
+    # as a structural 5S surrogate and so doesn't contact any canonical
+    # tRNA-binding-site anchor) must still surface somewhere in the
+    # output, otherwise it disappears from view entirely.
     placed_ifes: set[str] = set()
-    for role in ("ssu_main_rrna", "lsu_main_rrna", "lsu_associated_rrna", "trna"):
+    for role in ("ssu_main_rrna", "lsu_main_rrna", "lsu_associated_rrna"):
         placed_ifes |= {chain.ife for chain in by_role.get(role, [])}
     for chain in (
         assignments.mrna_chain,
