@@ -92,12 +92,23 @@ def matches_ribosomal_protein_narrow(
 ) -> bool:
     """§13.1 narrow rule: ``"ribosomal protein"`` substring (case-insensitive).
 
+    Also matches the Ban-nomenclature pattern ``"ribosomal subunit protein"``
+    (e.g. UniProt ``"Large ribosomal subunit protein uL2m"`` for human
+    mitoribosomal uL2m), which is the canonical form for all modern
+    mitoribosomal and cytoplasmic ribosomal proteins in UniProt.
+
     Used by :mod:`rcsb_client` to set ``ChainRef.is_ribosomal_protein`` at
     parse time, and by §12.4's factor search to exclude ribosomal proteins
     from the "nearest non-ribosomal protein at the CCA end" lookup.
     """
     for candidate in (description, uniprot_name):
-        if candidate and _RIBOSOMAL_PROTEIN_SUBSTRING in candidate.lower():
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if (
+            _RIBOSOMAL_PROTEIN_SUBSTRING in lowered
+            or _RIBOSOMAL_SUBUNIT_PROTEIN_SUBSTRING in lowered
+        ):
             return True
     return False
 

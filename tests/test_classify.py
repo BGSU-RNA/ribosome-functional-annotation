@@ -100,6 +100,17 @@ def _n_proteins(n: int, superkingdom: str = "Bacteria") -> list[ChainRef]:
         ("50S ribosomal protein L1", None, True),
         ("30S RIBOSOMAL PROTEIN S1", None, True),
         (None, "ribosomal protein L11", True),
+        # Ban-nomenclature pattern used by UniProt for modern ribosomal
+        # protein names (cytoplasmic and mitoribosomal). The narrow rule
+        # must accept "ribosomal subunit protein" as a synonym of
+        # "ribosomal protein", otherwise every mitoribosomal protein gets
+        # mis-classified as a non-ribosomal factor candidate (cf. 3J9M
+        # human 55S mitoribosome).
+        ("uL2m", "Large ribosomal subunit protein uL2m", True),
+        ("uS5m", "Small ribosomal subunit protein uS5m", True),
+        (None, "Large ribosomal subunit protein eL40", True),
+        # Substring is case-insensitive.
+        (None, "LARGE RIBOSOMAL SUBUNIT PROTEIN UL2M", True),
         ("Elongation factor Tu", None, False),
         ("16S ribosomal RNA", None, False),  # "ribosomal" but not "ribosomal protein"
         ("S1", None, False),  # §13.1 known false negative

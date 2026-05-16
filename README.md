@@ -275,18 +275,22 @@ Skipped and failed annotations appear in JSON but are omitted from CSV.
 Behaviours v1 accepts but you should know about:
 
 - **`ribosome_state_annotator.classify.matches_ribosomal_protein_narrow`** is
-  a plain substring check for `"ribosomal protein"`. It produces:
+  a substring check for `"ribosomal protein"` *or* `"ribosomal subunit
+  protein"` (the Ban-nomenclature pattern UniProt uses for modern
+  cytoplasmic and mitoribosomal protein names, e.g.
+  `"Large ribosomal subunit protein uL2m"`). It produces:
   - A false positive: `"Ribosomal protein S6 kinase"` (RPS6K, an mTOR-pathway
     kinase that phosphorylates ribosomal protein S6) contains the literal
     substring and gets flagged as a ribosomal protein. Acceptable in v1
     because such chains are rarely present in ribosome assemblies, and when
     they are, their geometry is far from the tRNA CCA end — excluding them
     from the factor search costs nothing.
-  - A false negative: chains named just `"S1"` / `"L11"` without the
-    `"ribosomal"` substring are missed. Rare in modern PDB depositions;
-    common in older entries. The broader superkingdom-vote rule catches
-    these via an anchored regex, but the `is_ribosomal_protein` flag
-    used by the factor search stays on the narrow rule.
+  - A false negative: chains named just `"S1"` / `"L11"` with no
+    `"ribosomal"` substring in either `description` or `uniprot_name`
+    are missed. Rare in modern PDB depositions; common in older
+    entries. The broader superkingdom-vote rule catches these via an
+    anchored regex, but the `is_ribosomal_protein` flag used by the
+    factor search stays on the narrow rule.
 - The allow-list / deny-list overrides for ribosomal-protein detection
   (`extra_ribosomal_descriptions`, `non_ribosomal_overrides`) are NOT
   exposed in the v1 API. Workaround: rebuild the `ChainRef`s with
