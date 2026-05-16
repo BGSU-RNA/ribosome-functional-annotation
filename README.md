@@ -1,32 +1,31 @@
 # ribosome-state-annotator
 
-Production-quality Python package that annotates the functional state of
-complete bacterial and eukaryotic ribosome assemblies from PDB entries.
-Usable as a CLI (`ribostate`) or as a library
+Python package that annotates the functional state of complete
+bacterial and eukaryotic ribosome assemblies from PDB entries. Usable
+as a CLI (`ribostate`) or as a library
 (`import ribosome_state_annotator`).
 
 ## Status
 
-v1, pre-release. All the spec's core scope works end-to-end. See
+v1, pre-release. See
 [`ribosome_functional_annotation_package_spec_v3.md`](./ribosome_functional_annotation_package_spec_v3.md)
-for the full design and the assumptions baked into the v1 cut.
+for the full design.
 
-## How it works (1 paragraph)
+## Short summary
 
-Given a PDB ID, the package fetches the entry metadata from RCSB's
-GraphQL API (augmented with PDBe's REST Rfam mappings for rRNA chains),
-decides whether the assembly is a complete bacterial, eukaryotic, or
-eukaryotic-organellar ribosome (spec §7, §8), pulls curated
-**functional-site anchor nucleotides** from a reference ribosome
-(*E. coli* 5J7L for bacterial / organellar, yeast 7ZW0 for eukaryotic
-cytoplasmic), asks BGSU's RNA correspondence API where those
-nucleotides land in the query ribosome, downloads the biological
-assembly mmCIF, and uses Gemmi to detect which chains in the query
-physically contact those mapped anchors. Those chains are inferred as
-mRNA / A-tRNA / P-tRNA / E-tRNA, and their SSU/LSU contact pattern
-gives the tRNA functional state (`A/A`, `ap/AP`, `A/Elongation factor
-Tu`, etc.). This is the "contact-transfer annotation" workflow — spec
-§3.3 has the long version.
+Given a PDB ID, the package pulls entry metadata from RCSB GraphQL
+(augmented with PDBe REST Rfam mappings for rRNA chains), classifies
+the assembly as bacterial / eukaryotic / eukaryotic-organellar, and
+projects curated **functional-site anchor nucleotides** from a
+reference ribosome (*E. coli* 5J7L for bacterial / organellar, yeast
+7ZW0 for eukaryotic cytoplasmic) onto the query via BGSU correspondence.
+It then downloads the biological-assembly mmCIF and uses Gemmi to find
+which chains in the query physically contact those mapped anchors —
+giving the mRNA / A-tRNA / P-tRNA / E-tRNA assignments and the SSU/LSU
+contact pattern that determines the tRNA functional state (`A/A`,
+`ap/AP`, `A/Elongation factor Tu`, etc.). This is the
+"contact-transfer annotation" workflow — spec §3.3 has the long
+version.
 
 ## Workflow
 
@@ -83,21 +82,13 @@ its own functional-chain assignment and tRNA states.
 Requires Python ≥3.10.
 
 ```bash
-git clone <repo-url> ribosome-functional-annotation
+git clone https://github.com/BGSU-RNA/ribosome-functional-annotation.git
 cd ribosome-functional-annotation
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e .          # runtime only
+pip install -e ".[dev]"   # add ruff / mypy / pytest
 ```
-
-For end users (no dev tooling):
-
-```bash
-pip install -e .
-```
-
-Editable install is the only currently-supported install mode; PyPI
-distribution is a v1.1 concern.
 
 ## Running the package
 
@@ -195,29 +186,16 @@ write_json(annotations, Path("out.json"))
 write_chain_csv(annotations, Path("chain.csv"))
 ```
 
-## Output
+## Output formats
 
-JSON (default `--output` extension): see spec §15.1 for the field
-layout. The role-based rRNA lists are the canonical shape; the legacy
-`ssu_chain` / `lsu_chain` aliases appear too.
+| Format | When emitted | Notes |
+|--------|--------------|-------|
+| JSON | Default, or `--output foo.json` | Full `RibosomeAnnotation` list. Field layout in spec §15.1 and `models.py`. |
+| JSONL | `--output foo.jsonl` | One annotation per line. For streaming consumers. |
+| `ribosome_chain_annotation.csv` | Default companion (suppress with `--no-csv`) | One row per annotated assembly, 13 columns. Matches the legacy prototype byte-for-byte (spec §15.3). |
+| `ribosome_assembly_annotation.csv` | Default companion | One row per `(property, value)` tuple: species, non-ribosomal proteins, bound ligands, unmapped RNA chains, plus v1 extensions (classification, superkingdom, warnings). |
 
-CSV — two files matching the prototype's byte-for-byte layout
-(spec §15.3):
-
-- `ribosome_chain_annotation.csv` — one row per annotated assembly with
-  13 columns (`pdb_id`, `assembly_id`, `ssu_chain`, `lsu_large_chain`,
-  `lsu_medium_chain` for 5.8S, `lsu_small_chain` for 5S, `mrna`,
-  `aminoacyl_trna`, `peptidyl_trna`, `exit_trna`, plus three
-  tRNA-state columns).
-- `ribosome_assembly_annotation.csv` — one row per `(property, value)`
-  tuple: `species_name`, `non_ribosomal_proteins`, `bound_ligands`,
-  `unmapped_rna_chains`, plus v1-extension rows
-  (`ribosome_classification`, `dominant_superkingdom`, `warning`)
-  appended at the end so the byte-stable prefix matches the prototype.
-
-Skipped and failed annotations appear in JSON but NOT in CSV.
-
-JSONL is available via `--output foo.jsonl` for streaming consumers.
+Skipped and failed annotations appear in JSON but are omitted from CSV.
 
 ## Known limitations (spec §13.1 + §3.2)
 
@@ -254,10 +232,10 @@ v1 out-of-scope (spec §3.2):
 
 Every external call is cached on disk at
 `~/.cache/ribosome-state-annotator/` (override with `--cache-dir`,
-disable with `--no-cache`). The cache is content-addressed and never
-expires — to refresh, delete the entry (`ribostate cache clear`) or
-drop the cache root. See spec §17 for the exact key format and
-invalidation rationale.
+disable with `--no-cache`). Four namespaces: `rcsb/`, `bgsu/`, `pdbe/`,
+`coords/`. The cache is content-addressed and never expires — to
+refresh, use `ribostate cache clear` or delete the cache root. See spec
+§17 for the key format.
 
 ## Package layout
 
@@ -303,6 +281,11 @@ The integration tests under `tests/integration/` hit the live
 RCSB / BGSU / PDBe APIs and download mmCIF files; they're excluded from
 the default `pytest` run. See `tests/fixtures/acceptance_set.md` for
 the PDB IDs the spec §25.1 acceptance tests use.
+
+## Contributors
+
+- Sri Devan Appasamy
+- Claude (Anthropic) — pair-programmed the v1 build under direction
 
 ## License
 
