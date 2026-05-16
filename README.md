@@ -276,10 +276,12 @@ Behaviours v1 accepts but you should know about:
 
 - **`ribosome_state_annotator.classify.matches_ribosomal_protein_narrow`** is
   a plain substring check for `"ribosomal protein"`. It produces:
-  - A false positive: `"ribosomal recycling factor"` contains the
-    substring and gets flagged. Acceptable in v1 because RRF's
-    geometry near the CCA end is similar enough that excluding it from
-    the factor search doesn't lose anything important.
+  - A false positive: `"Ribosomal protein S6 kinase"` (RPS6K, an mTOR-pathway
+    kinase that phosphorylates ribosomal protein S6) contains the literal
+    substring and gets flagged as a ribosomal protein. Acceptable in v1
+    because such chains are rarely present in ribosome assemblies, and when
+    they are, their geometry is far from the tRNA CCA end — excluding them
+    from the factor search costs nothing.
   - A false negative: chains named just `"S1"` / `"L11"` without the
     `"ribosomal"` substring are missed. Rare in modern PDB depositions;
     common in older entries. The broader superkingdom-vote rule catches
