@@ -51,13 +51,16 @@ stdout_console = Console()
 
 
 def _err(message: str) -> None:
-    """Emit a message to stderr via typer.echo so Click's CliRunner can capture it.
+    """Emit a Rich-markup message to stderr.
 
-    Rich's :class:`Console` binds to ``sys.stderr`` at construction time; if we
-    instantiated a module-level ``Console(stderr=True)``, every test would see
-    the original (unredirected) stderr and the assertions would fail.
+    A fresh ``Console`` is constructed per call so that the binding picks
+    up whatever ``sys.stderr`` currently is — important for Click's
+    ``CliRunner``, which redirects stderr at test time. Rich auto-strips
+    ANSI sequences when stderr is not a TTY, so markup like
+    ``[red]...[/red]`` renders as colour on terminals and as plain text
+    under capture.
     """
-    typer.echo(message, err=True)
+    Console(stderr=True).print(message)
 
 
 CHAIN_CSV_FILENAME = "ribosome_chain_annotation.csv"
@@ -416,6 +419,7 @@ def cache_info(
     else:
         table.add_row("rcsb", str(info.rcsb_entries))
         table.add_row("bgsu", str(info.bgsu_entries))
+        table.add_row("pdbe", str(info.pdbe_entries))
         table.add_row("coords", str(info.coords_entries))
         table.add_row("[bold]total entries", f"[bold]{info.total_entries}[/bold]")
         table.add_row("total bytes", f"{info.total_bytes:,}")
