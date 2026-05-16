@@ -30,3 +30,11 @@ coverage.xml
 # Local annotator caches (spec §17)
 .cache/
 ~/.cache/ribosome-state-annotator/
+
+# CLI output artifacts (when run from repo root)
+/[0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9].json
+/batch.json
+/batch.jsonl
+/ribosome_chain_annotation.csv
+/ribosome_assembly_annotation.csv
+/pdb_ids.txt

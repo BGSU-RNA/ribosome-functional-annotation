@@ -137,6 +137,7 @@ def annotate_pdb(
     """
     resolved_cache = _resolve_cache(cache, cache_dir, no_cache)
     pdb_id_upper = pdb_id.upper()
+    logger.info("annotating %s%s", pdb_id_upper, f" (assembly {assembly_id})" if assembly_id else "")
 
     try:
         entry_payload = _get_or_fetch_entry(pdb_id_upper, resolved_cache, client)
@@ -231,17 +232,21 @@ def annotate_assembly(
 def annotate_many(
     pdb_ids: Iterable[str],
     *,
-    continue_on_error: bool = False,
+    continue_on_error: bool = True,
     **kwargs: Any,
 ) -> list[RibosomeAnnotation]:
     """Batch wrapper. Iterates ``pdb_ids`` and calls :func:`annotate_pdb` on each.
 
-    With ``continue_on_error=True`` (the CLI default for batch mode),
-    per-entry exceptions are caught and recorded as a
-    ``status="failed"`` annotation rather than propagating.
+    With ``continue_on_error=True`` (the default), per-entry exceptions
+    are caught and recorded as a ``status="failed"`` annotation rather
+    than propagating. Pass ``continue_on_error=False`` to abort the
+    batch on the first error instead.
     """
     aggregated: list[RibosomeAnnotation] = []
-    for pdb_id in pdb_ids:
+    pdb_ids_list = list(pdb_ids)
+    total = len(pdb_ids_list)
+    for index, pdb_id in enumerate(pdb_ids_list, start=1):
+        logger.info("[batch %d/%d] %s", index, total, pdb_id.upper())
         try:
             aggregated.extend(annotate_pdb(pdb_id, **kwargs))
         except RibosomeAnnotatorError as exc:

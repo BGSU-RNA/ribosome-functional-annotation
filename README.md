@@ -159,36 +159,40 @@ fits your workflow.
 
 ### From the command line
 
-**One PDB → JSON + companion CSVs:**
+**One PDB → JSON + companion CSVs in current directory:**
 
 ```bash
-ribostate annotate 5UYM -o 5uym.json
-# writes 5uym.json, ribosome_chain_annotation.csv, ribosome_assembly_annotation.csv
+ribostate annotate 5UYM
+# writes 5UYM.json, ribosome_chain_annotation.csv, ribosome_assembly_annotation.csv
 ```
 
-**One PDB → JSON to stdout (no files):**
+**Choose where the output goes:**
 
 ```bash
-ribostate annotate 5UYM --stdout
+ribostate annotate 5UYM -o ./results/            # → results/5UYM.json + CSVs
+ribostate annotate 5UYM -o ./results/my.json     # → results/my.json + CSVs
+ribostate annotate 5UYM --stdout                 # JSON to stdout, no files
 ```
 
 **One biological assembly only:**
 
 ```bash
-ribostate annotate 4V5Q --assembly-id 1 -o 4v5q_a1.json
+ribostate annotate 4V5Q --assembly-id 1 -o ./results/
 ```
 
 **Batch over many PDBs:**
 
 ```bash
-echo -e "5J7L\n7ZW0\n6ZMI" > pdb_ids.txt
-ribostate annotate-batch pdb_ids.txt -o batch.json --continue-on-error
+printf "5J7L\n7ZW0\n6ZMI\n" > pdb_ids.txt
+ribostate annotate-batch pdb_ids.txt
+# writes batch.json + the two CSVs in cwd. Per-PDB errors are logged
+# and the batch continues; use --abort-on-error to stop on first failure.
 ```
 
 **Local mmCIF (skip RCSB download):**
 
 ```bash
-ribostate annotate 5UYM --input-file ./5uym-assembly1.cif -o 5uym.json
+ribostate annotate 5UYM --input-file ./5uym-assembly1.cif
 ```
 
 **Cache maintenance:**
@@ -198,6 +202,12 @@ ribostate cache info        # entry counts per namespace
 ribostate cache clear --yes # wipe everything
 ```
 
+Output-path resolution:
+
+- **`-o` omitted** → write `<PDB>.json` (single) or `batch.json` (batch) to the current directory.
+- **`-o` is a directory** → write the auto-named JSON inside that directory.
+- **`-o` is a file with `.json` / `.jsonl` / `.csv` suffix** → write to that exact path.
+
 Other useful flags:
 
 | Flag | Effect |
@@ -205,12 +215,14 @@ Other useful flags:
 | `--assembly-id N` | Restrict to one biological assembly. |
 | `--stdout` | JSON to stdout, no files written. |
 | `--no-csv` | JSON only — suppress the two companion CSVs. |
+| `--abort-on-error` | Stop the batch on the first per-entry error (batch only). |
 | `--cutoff 5.0` | Gemmi neighbour-search cutoff (Å). |
 | `--cache-dir PATH` | Override `~/.cache/ribosome-state-annotator`. |
 | `--no-cache` | Disable caching for this invocation. |
 | `--strict` | Skip (don't just warn) assemblies with low ribosomal-protein counts. |
 | `--input-file PATH` | Parse a local mmCIF instead of downloading from RCSB. |
-| `--verbose` / `--debug` | Increase log verbosity. |
+| `--quiet` | Suppress INFO progress; warnings/errors only. |
+| `--debug` | DEBUG-level logging (includes HTTP traces). |
 
 Full help: `ribostate --help`, `ribostate annotate --help`,
 `ribostate annotate-batch --help`, `ribostate cache --help`.

@@ -144,9 +144,19 @@ def test_annotate_stdout_writes_json_to_stdout(
     assert "bacterial_ribosome" in result.stdout
 
 
-def test_annotate_requires_output_or_stdout() -> None:
-    result = runner.invoke(cli.app, ["annotate", "5J7L", "--no-cache"])
-    assert result.exit_code == 2
+def test_annotate_without_output_or_stdout_auto_names_in_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Omitting both --output and --stdout is now valid: the CLI auto-names
+    ``<PDB>.json`` (uppercase) in the current working directory and writes
+    the two companion CSVs alongside."""
+    _patch_annotate_pdb(monkeypatch, [_annotated()])
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(cli.app, ["annotate", "5j7l", "--no-cache"])
+    assert result.exit_code == 0, result.stderr
+    assert (tmp_path / "5J7L.json").exists()
+    assert (tmp_path / "ribosome_chain_annotation.csv").exists()
+    assert (tmp_path / "ribosome_assembly_annotation.csv").exists()
 
 
 def test_annotate_output_and_stdout_mutually_exclusive(

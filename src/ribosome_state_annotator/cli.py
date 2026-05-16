@@ -72,18 +72,49 @@ ASSEMBLY_CSV_FILENAME = "ribosome_assembly_annotation.csv"
 # ---------------------------------------------------------------------------
 
 
-def _configure_logging(verbose: bool, debug: bool) -> None:
-    """Configure root logging level for the CLI. Library code does not call this."""
+def _configure_logging(quiet: bool, debug: bool) -> None:
+    """Configure root logging level for the CLI. Library code does not call this.
+
+    Default level is INFO so that progress messages from the annotation
+    pipeline (RCSB fetch, BGSU correspondence, coord load, etc.) are
+    visible by default. ``--quiet`` suppresses to WARNING; ``--debug``
+    opens up to DEBUG.
+
+    Routing goes through Rich's :class:`RichHandler` for coloured level
+    badges and clean per-line formatting on the terminal.
+    """
+    from rich.logging import RichHandler
+
     if debug:
         level = logging.DEBUG
-    elif verbose:
-        level = logging.INFO
-    else:
+    elif quiet:
         level = logging.WARNING
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    else:
+        level = logging.INFO
+
+    # Reconfigure the root logger idempotently — subsequent CLI invocations
+    # within the same process (e.g. CliRunner in tests) must not stack
+    # handlers.
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.setLevel(level)
+    root.addHandler(
+        RichHandler(
+            console=Console(stderr=True),
+            show_path=False,
+            show_time=False,
+            markup=False,
+            rich_tracebacks=False,
+        )
     )
+
+    # httpx logs every request at INFO which drowns out the pipeline
+    # narration; downgrade to WARNING unless the user explicitly asked
+    # for DEBUG.
+    if not debug:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _ensure_parent(output_path: Path, no_create_dirs: bool) -> None:
@@ -101,13 +132,37 @@ def _validate_output_flags(output: Path | None, stdout: bool) -> None:
 
     Called at the top of each command body so flag misuse fails fast
     without first hitting the live RCSB / BGSU / PDBe / RCSB-file APIs.
+    Either / both can be omitted; the default is to write to the current
+    directory with an auto-generated filename (see :func:`_resolve_output_path`).
     """
     if stdout and output is not None:
         _err("[red]--stdout and --output are mutually exclusive[/red]")
         raise typer.Exit(code=2)
-    if not stdout and output is None:
-        _err("[red]one of --output PATH or --stdout is required[/red]")
-        raise typer.Exit(code=2)
+
+
+_RECOGNISED_OUTPUT_SUFFIXES = {".json", ".jsonl", ".csv"}
+
+
+def _resolve_output_path(output: Path | None, default_basename: str) -> Path:
+    """Resolve the user's ``--output`` (or absence thereof) into a file path.
+
+    Rules:
+
+    - Omitted (``None``) → ``<cwd>/<default_basename>.json``.
+    - Existing directory, or path ending in ``/``, or path with no
+      recognised file suffix → treat as a directory; return
+      ``<output>/<default_basename>.json``.
+    - Otherwise → return ``output`` unchanged (the caller asked for a
+      specific file).
+
+    ``default_basename`` is ``<pdb_id>`` for single-entry annotation and
+    ``"batch"`` for batch annotation.
+    """
+    if output is None:
+        return Path.cwd() / f"{default_basename}.json"
+    if output.is_dir() or str(output).endswith("/") or output.suffix.lower() not in _RECOGNISED_OUTPUT_SUFFIXES:
+        return output / f"{default_basename}.json"
+    return output
 
 
 def _emit_annotations(
@@ -117,10 +172,18 @@ def _emit_annotations(
     stdout: bool,
     no_create_dirs: bool,
     no_csv: bool,
+    default_basename: str,
 ) -> None:
     """Route annotations to stdout or to ``output`` per CLI flags.
 
-    Format inference from ``output`` extension:
+    Output-path resolution (see :func:`_resolve_output_path`):
+
+    - ``--stdout`` → JSON to stdout, no files.
+    - ``--output`` omitted → ``<cwd>/<default_basename>.json``.
+    - ``--output`` is a directory → ``<output>/<default_basename>.json``.
+    - ``--output`` is a file with a recognised suffix → used as-is.
+
+    Format inference from the resolved file's extension:
 
     - ``.jsonl`` → JSON-Lines
     - ``.csv`` → chain-level CSV (no companion assembly CSV)
@@ -128,10 +191,7 @@ def _emit_annotations(
 
     When writing JSON to a file and ``--no-csv`` is *not* set, two
     companion CSVs are written alongside (``ribosome_chain_annotation.csv``
-    and ``ribosome_assembly_annotation.csv``) per spec §15.3.
-
-    Callers are expected to have already run :func:`_validate_output_flags`;
-    re-checking here for defence in depth.
+    and ``ribosome_assembly_annotation.csv``).
     """
     _validate_output_flags(output, stdout)
 
@@ -141,30 +201,30 @@ def _emit_annotations(
         stdout_console.print(render_json(annotations), highlight=False)
         return
 
-    assert output is not None
-    _ensure_parent(output, no_create_dirs)
-    suffix = output.suffix.lower()
+    resolved = _resolve_output_path(output, default_basename)
+    _ensure_parent(resolved, no_create_dirs)
+    suffix = resolved.suffix.lower()
     if suffix == ".jsonl":
-        write_jsonl(annotations, output)
+        write_jsonl(annotations, resolved)
     elif suffix == ".csv":
-        write_chain_csv(annotations, output)
+        write_chain_csv(annotations, resolved)
     else:
-        write_json(annotations, output)
+        write_json(annotations, resolved)
         if not no_csv:
-            chain_csv_path = output.parent / CHAIN_CSV_FILENAME
-            assembly_csv_path = output.parent / ASSEMBLY_CSV_FILENAME
+            chain_csv_path = resolved.parent / CHAIN_CSV_FILENAME
+            assembly_csv_path = resolved.parent / ASSEMBLY_CSV_FILENAME
             write_chain_csv(annotations, chain_csv_path)
             write_assembly_csv(annotations, assembly_csv_path)
             _err(
                 f"[green]wrote {chain_csv_path.name} and {assembly_csv_path.name}"
-                f" alongside {output.name}[/green]"
+                f" alongside {resolved.name}[/green]"
             )
 
     n_annotated = sum(1 for a in annotations if a.status == "annotated")
     n_skipped = sum(1 for a in annotations if a.status == "skipped")
     n_failed = sum(1 for a in annotations if a.status == "failed")
     _err(
-        f"[green]wrote {len(annotations)} annotation(s) to {output} "
+        f"[green]wrote {len(annotations)} annotation(s) to {resolved} "
         f"(annotated={n_annotated}, skipped={n_skipped}, failed={n_failed})[/green]"
     )
 
@@ -282,11 +342,11 @@ def annotate(
             help="Local mmCIF (.cif or .cif.gz) instead of downloading from RCSB.",
         ),
     ] = None,
-    verbose: Annotated[bool, typer.Option("--verbose", help="INFO-level logging.")] = False,
-    debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging.")] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
+    debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
     """Annotate one PDB entry (every biological assembly, or one --assembly-id)."""
-    _configure_logging(verbose=verbose, debug=debug)
+    _configure_logging(quiet=quiet, debug=debug)
     _validate_output_flags(output, stdout)
     coordinate_source, local_path = _resolve_coordinate_source(input_file)
     annotations = annotate_pdb(
@@ -305,6 +365,7 @@ def annotate(
         stdout=stdout,
         no_create_dirs=no_create_dirs,
         no_csv=no_csv,
+        default_basename=pdb_id.upper(),
     )
 
 
@@ -332,11 +393,11 @@ def annotate_batch(
         bool,
         typer.Option("--stdout", help="Write JSON to stdout instead of a file."),
     ] = False,
-    continue_on_error: Annotated[
+    abort_on_error: Annotated[
         bool,
         typer.Option(
-            "--continue-on-error",
-            help="Don't abort the batch on per-entry errors; emit a failed record and continue.",
+            "--abort-on-error",
+            help="Stop the batch on the first per-entry error (default: log and continue).",
         ),
     ] = False,
     cutoff: Annotated[
@@ -369,11 +430,11 @@ def annotate_batch(
             help="Fail rather than auto-creating missing parent directories for --output.",
         ),
     ] = False,
-    verbose: Annotated[bool, typer.Option("--verbose", help="INFO-level logging.")] = False,
-    debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging.")] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
+    debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
     """Annotate every PDB ID listed in PDB_IDS_FILE."""
-    _configure_logging(verbose=verbose, debug=debug)
+    _configure_logging(quiet=quiet, debug=debug)
     _validate_output_flags(output, stdout)
     pdb_ids = _read_pdb_ids(pdb_ids_file)
     if not pdb_ids:
@@ -381,7 +442,7 @@ def annotate_batch(
         raise typer.Exit(code=2)
     annotations = annotate_many(
         pdb_ids,
-        continue_on_error=continue_on_error,
+        continue_on_error=not abort_on_error,
         contact_cutoff_angstrom=cutoff,
         cache_dir=cache_dir,
         no_cache=no_cache,
@@ -393,6 +454,7 @@ def annotate_batch(
         stdout=stdout,
         no_create_dirs=no_create_dirs,
         no_csv=no_csv,
+        default_basename="batch",
     )
 
 
