@@ -74,14 +74,21 @@ class ChainAssignments(BaseModel):
 class TRNAStates(BaseModel):
     """Output of :func:`compute_trna_states` (spec §12).
 
-    State strings have the form ``"<SSU>/<LSU>"`` for A-tRNA / P-tRNA and
-    are exactly ``"E/E"`` for E-tRNA when assigned. The LSU half can be a
-    canonical token (``"A"``, ``"P"``, ``"AP"``, ``"E"``, ``"PE"``, ``"*"``,
-    ``"**"``) or the name of a protein factor near the tRNA's CCA end
-    (§12.4) — preferring the chain's ``uniprot_name`` (canonical
-    cross-deposit identifier) and falling back to ``pdbx_description``
-    when no UniProt name is available. The spec deliberately keeps the
-    latter free-text rather than mapping to canonical tokens.
+    State strings have the form ``"<SSU>/<LSU>"`` for A-tRNA / P-tRNA
+    and are exactly ``"E/E"`` for E-tRNA when assigned. Per the
+    Zhou *et al.* 2014 convention (see REFERENCES.md):
+
+    - **Lowercase letters denote SSU contacts**; uppercase letters
+      denote LSU contacts. A doubled letter on either side means the
+      tRNA simultaneously contacts two adjacent sites on that subunit
+      (chimeric on that subunit).
+    - The SSU half is ``"A"``, ``"P"``, ``"E"``, ``"ap"``, ``"pe"``,
+      or ``"*"``.
+    - The LSU half is ``"A"``, ``"P"``, ``"E"``, ``"AP"``, ``"PE"``,
+      ``"*"``, ``"**"`` (contact found but unlabelable), or the name
+      of a protein factor near the tRNA's CCA end (§12.4) — preferring
+      the chain's ``uniprot_name`` and falling back to
+      ``pdbx_description`` when no UniProt name is available.
     """
 
     aminoacyl_trna_state: str | None = None

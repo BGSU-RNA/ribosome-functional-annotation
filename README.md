@@ -38,10 +38,16 @@ large-subunit site:
   swings into the next LSU site while the anticodon end stays put on
   the SSU. Hybrid configurations are direct evidence of a
   post-peptidyl-transfer, pre-translocation intermediate.
-- **Chimeric / intermediate states** (lowercase letters, e.g.
-  `ap/AP`) — the tRNA simultaneously contacts two adjacent sites,
-  catching it mid-translocation. Lowercase signals partial contact;
-  uppercase signals full contact.
+- **Chimeric / intermediate states** — the tRNA simultaneously
+  contacts two adjacent sites on at least one subunit, catching it
+  mid-translocation. Following the Zhou *et al.* 2014 convention
+  (see [`REFERENCES.md`](./REFERENCES.md)), **case indicates the
+  subunit**: lowercase letters are SSU contacts (`ap` = "A+P on
+  the 30S/40S body"; `pe` = "P+E on the 30S/40S body"), uppercase
+  letters are LSU contacts (`AP`, `PE`). Either or both sides can
+  carry doubled letters: `ap/A` is chimeric on the SSU only;
+  `ap/AP` is fully chimeric on both subunits — the definitive
+  EF-G-trapped translocation intermediate.
 - **Factor-bound A-site** (`A/Elongation factor Tu`,
   `A/Release factor 1`, …) — when the A-tRNA's CCA end is held by a
   protein factor rather than docked into the LSU peptidyl-transferase

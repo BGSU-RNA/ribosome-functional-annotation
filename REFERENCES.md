@@ -3,6 +3,38 @@
 Citations for the biological data sources, classification rules, and
 naming conventions the package relies on.
 
+## tRNA functional-state notation
+
+The `<SSU>/<LSU>` state-string notation used throughout this package
+(e.g. `A/A`, `A/P`, `ap/AP`, `pe/E`) is the standard convention from
+two key papers:
+
+- **Moazed, D. & Noller, H. F. (1989). Intermediate states in the
+  movement of transfer RNA in the ribosome. *Nature*, 342, 142–148.**
+  DOI: [10.1038/342142a0](https://doi.org/10.1038/342142a0). The
+  foundational hybrid-states paper, introducing the
+  `<SSU-site>/<LSU-site>` notation. Showed via chemical-protection
+  footprinting that after peptide-bond formation but before
+  translocation, deacylated and peptidyl tRNAs occupy hybrid `P/E`
+  and `A/P` configurations — the acceptor end has swung into the
+  next LSU site while the anticodon end remains on the SSU. All
+  single-letter both-uppercase states (`A/A`, `P/P`, `E/E`, `A/P`,
+  `P/E`) originate here.
+
+- **Zhou, J., Lancaster, L., Donohue, J. P. & Noller, H. F. (2014).
+  How the ribosome hands the A-site tRNA to the P site during
+  EF-G-catalyzed translocation. *Science*, 345, 1188–1191.** DOI:
+  [10.1126/science.1255030](https://doi.org/10.1126/science.1255030).
+  Defined the **chimeric** hybrid states and the lowercase/uppercase
+  case convention used by this package: **lowercase letters denote
+  SSU (small-subunit) contacts; uppercase letters denote LSU
+  (large-subunit) contacts**. A doubled letter on either side
+  (`ap`, `pe`, `AP`, `PE`) means the tRNA simultaneously contacts
+  two adjacent sites on that subunit. The fully chimeric `ap/AP`
+  and `pe/PE` states correspond to the EF-G-trapped translocation
+  intermediate (PDB **4W29** is the canonical structure of this
+  state).
+
 ## Ribosomal-protein nomenclature
 
 - **Ban, N., Beckmann, R., Cate, J. H. D., Dinman, J. D., Dragon, F.,
