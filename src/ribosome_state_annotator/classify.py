@@ -71,10 +71,24 @@ class ClassificationResult(BaseModel):
 _RIBOSOMAL_PROTEIN_SUBSTRING = "ribosomal protein"
 _RIBOSOMAL_SUBUNIT_PROTEIN_SUBSTRING = "ribosomal subunit protein"
 
-# Spec §8.4 — anchored regex matching common ribosomal-protein chain names.
-# Verbatim from the spec; see the spec note for the deliberate trade-offs
-# (e.g. it matches bare "S1" / "L11" / "uS3" but does not match "RPS3" with
-# trailing digits because the anchor + word boundary disallow it).
+# Ban-nomenclature short-form pattern (Ban et al. 2014, see REFERENCES.md).
+# Matches the canonical systematic names for ribosomal proteins —
+# ``uS\d{1,2}`` / ``uL\d{1,2}`` (universal small/large), ``bS\d{1,2}`` /
+# ``bL\d{1,2}`` (bacteria-specific), ``eS\d{1,2}`` / ``eL\d{1,2}``
+# (eukaryote-specific), ``mS\d{1,2}`` / ``mL\d{1,2}`` (mitochondria-
+# specific) — when used as the bare entity description (e.g. RCSB's
+# pdbx_description for the mitoribosomal protein bL28m is just
+# ``"bL28m"``, with no "ribosomal protein" substring and no UniProt
+# cross-reference). Anchored at start + word-boundary at end so it
+# doesn't false-match longer strings like ``uL2mut`` or ``bS6may``.
+_BAN_NOMENCLATURE_REGEX = re.compile(
+    r"^(?:uS|uL|bS|bL|eS|eL|mS|mL)\d{1,2}[a-zA-Z]?\b"
+)
+
+# Spec §8.4 — broader anchored regex used **only** for the superkingdom
+# vote. Includes both Ban-nomenclature short forms and looser legacy
+# patterns (RPS/RPL/MRP/MRPS/MRPL, bare ``S1`` / ``L11``). See the
+# spec note for the deliberate trade-offs.
 _RIBOSOMAL_PROTEIN_NAME_REGEX = re.compile(
     r"^(MRP|MRPS|MRPL|RPS|RPL|"
     r"S\d{1,2}[A-Za-z]?|L\d{1,2}[A-Za-z]?|"
@@ -90,16 +104,29 @@ def matches_ribosomal_protein_narrow(
     description: str | None,
     uniprot_name: str | None,
 ) -> bool:
-    """§13.1 narrow rule: ``"ribosomal protein"`` substring (case-insensitive).
+    """§13.1 narrow rule: detect a ribosomal protein from its description
+    or UniProt name.
 
-    Also matches the Ban-nomenclature pattern ``"ribosomal subunit protein"``
-    (e.g. UniProt ``"Large ribosomal subunit protein uL2m"`` for human
-    mitoribosomal uL2m), which is the canonical form for all modern
-    mitoribosomal and cytoplasmic ribosomal proteins in UniProt.
+    Matches any of:
 
-    Used by :mod:`rcsb_client` to set ``ChainRef.is_ribosomal_protein`` at
-    parse time, and by §12.4's factor search to exclude ribosomal proteins
-    from the "nearest non-ribosomal protein at the CCA end" lookup.
+    1. The substring ``"ribosomal protein"`` (case-insensitive) — the
+       classical pattern (``"50S ribosomal protein L1"`` etc.).
+    2. The substring ``"ribosomal subunit protein"`` (case-insensitive) —
+       the Ban-nomenclature long form used by UniProt for modern
+       cytoplasmic and mitoribosomal protein names (e.g.
+       ``"Large ribosomal subunit protein uL2m"`` for human
+       mitoribosomal uL2m).
+    3. The Ban-nomenclature short-form regex
+       (``^(uS|uL|bS|bL|eS|eL|mS|mL)\\d{1,2}…``) — the canonical
+       systematic name used as the bare ``pdbx_description`` in many
+       modern RCSB deposits (e.g. ``"bL28m"`` in 3J9M, where the entity
+       has no UniProt cross-reference). See REFERENCES.md for the Ban
+       et al. 2014 paper defining this nomenclature.
+
+    Used by :mod:`rcsb_client` to set ``ChainRef.is_ribosomal_protein``
+    at parse time, and by §12.4's factor search to exclude ribosomal
+    proteins from the "nearest non-ribosomal protein at the CCA end"
+    lookup.
     """
     for candidate in (description, uniprot_name):
         if not candidate:
@@ -109,6 +136,8 @@ def matches_ribosomal_protein_narrow(
             _RIBOSOMAL_PROTEIN_SUBSTRING in lowered
             or _RIBOSOMAL_SUBUNIT_PROTEIN_SUBSTRING in lowered
         ):
+            return True
+        if _BAN_NOMENCLATURE_REGEX.match(candidate):
             return True
     return False
 

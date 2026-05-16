@@ -359,6 +359,14 @@ RCSB / BGSU / PDBe APIs and download mmCIF files; they're excluded from
 the default `pytest` run. See `tests/fixtures/acceptance_set.md` for
 the PDB IDs used by the acceptance tests.
 
+## References
+
+See [`REFERENCES.md`](./REFERENCES.md) for citations of the
+ribosomal-protein nomenclature (Ban *et al.* 2014), the curated
+reference ribosomes used for contact-transfer (5J7L, 7ZW0), the
+mitoribosome regression case (3J9M / Amunts *et al.* 2015), and the
+external APIs (RCSB / PDBe / BGSU / Rfam).
+
 ## Contributors
 
 - Sri Devan Appasamy

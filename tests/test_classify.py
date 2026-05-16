@@ -111,6 +111,25 @@ def _n_proteins(n: int, superkingdom: str = "Bacteria") -> list[ChainRef]:
         (None, "Large ribosomal subunit protein eL40", True),
         # Substring is case-insensitive.
         (None, "LARGE RIBOSOMAL SUBUNIT PROTEIN UL2M", True),
+        # Ban-nomenclature short-form pattern: when RCSB stores only the
+        # bare systematic name as pdbx_description and provides no
+        # UniProt cross-reference, the narrow rule must still recognise
+        # it as a ribosomal protein. See 3J9M chain X (bL28m) for the
+        # in-the-wild example, and REFERENCES.md for the Ban 2014
+        # nomenclature paper.
+        ("bL28m", None, True),
+        ("uL2m", None, True),
+        ("mS35", None, True),
+        ("eL40", None, True),
+        ("bS6m", None, True),
+        # Looks Ban-like but isn't — should NOT match.
+        ("mLpRetraction", None, False),
+        ("uLtimately", None, False),
+        # Non-Ban prefixes used by older deposits — not matched by the
+        # narrow rule (the broader §8.4 rule handles them for the
+        # superkingdom vote).
+        ("RPS5", None, False),
+        ("MRPS6", None, False),
         ("Elongation factor Tu", None, False),
         ("16S ribosomal RNA", None, False),  # "ribosomal" but not "ribosomal protein"
         ("S1", None, False),  # §13.1 known false negative
