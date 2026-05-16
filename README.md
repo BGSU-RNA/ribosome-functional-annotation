@@ -48,8 +48,9 @@ large-subunit site:
   centre, the LSU half of the label is replaced by the factor's name.
   Typical of decoding-state ternary complexes (EF-Tu·GTP·aa-tRNA) and
   termination complexes.
-- **`*` and `**`** — `*` means no contact was found at that subunit;
-  `**` means contact was found but couldn't be labelled.
+- **Missing-contact placeholders** — `*` means no contact was found at
+  that subunit; `**` means contact was found but couldn't be labelled
+  (typically a tRNA anticodon-stem-loop fragment too short to disambiguate).
 
 The PDB now contains thousands of ribosome structures spanning
 bacteria, archaea, and eukaryotes (cytoplasmic and organellar). Chain
@@ -135,9 +136,10 @@ conserved positions.
         └───────────────────────────────────────────────────┘
 ```
 
-Multi-assembly PDBs (e.g. 4V5Q) run the classify-through-assign block
-**once per biological assembly**, independently, so each assembly gets
-its own functional-chain assignment and tRNA states.
+A PDB entry may contain multiple biological assemblies (e.g. 4V5Q has
+two). The pipeline runs the classify-through-assign block **once per
+assembly**, independently — every assembly represents one complete
+ribosome and gets its own functional-chain assignment and tRNA states.
 
 ## Installation
 
@@ -241,8 +243,9 @@ print(annotation.ribosome_classification)        # "bacterial_ribosome"
 print(annotation.aminoacyl_trna_chain.ife)       # "5J7L|1|V"
 print(annotation.aminoacyl_trna_state)           # "A/A"
 
-# Batch over many PDB IDs (don't abort the batch on per-entry errors).
-results = annotate_many(["5J7L", "5TBW", "6ZMI"], continue_on_error=True)
+# Batch over many PDB IDs (continues past per-entry errors by default;
+# pass continue_on_error=False to abort on the first failure).
+results = annotate_many(["5J7L", "7ZW0", "6ZMI"])
 ```
 
 Each result is a `RibosomeAnnotation` Pydantic model — see
@@ -274,28 +277,22 @@ Skipped and failed annotations appear in JSON but are omitted from CSV.
 
 Behaviours v1 accepts but you should know about:
 
-- **`ribosome_state_annotator.classify.matches_ribosomal_protein_narrow`** is
-  a substring check for `"ribosomal protein"` *or* `"ribosomal subunit
-  protein"` (the Ban-nomenclature pattern UniProt uses for modern
-  cytoplasmic and mitoribosomal protein names, e.g.
-  `"Large ribosomal subunit protein uL2m"`). It produces:
-  - A false positive: `"Ribosomal protein S6 kinase"` (RPS6K, an mTOR-pathway
-    kinase that phosphorylates ribosomal protein S6) contains the literal
-    substring and gets flagged as a ribosomal protein. Acceptable in v1
-    because such chains are rarely present in ribosome assemblies, and when
-    they are, their geometry is far from the tRNA CCA end — excluding them
-    from the factor search costs nothing.
-  - A false negative: chains named just `"S1"` / `"L11"` with no
-    `"ribosomal"` substring in either `description` or `uniprot_name`
-    are missed. Rare in modern PDB depositions; common in older
-    entries. The broader superkingdom-vote rule catches these via an
-    anchored regex, but the `is_ribosomal_protein` flag used by the
-    factor search stays on the narrow rule.
-- The allow-list / deny-list overrides for ribosomal-protein detection
-  (`extra_ribosomal_descriptions`, `non_ribosomal_overrides`) are NOT
-  exposed in the v1 API. Workaround: rebuild the `ChainRef`s with
-  edited `is_ribosomal_protein` flags before passing them to the
-  inference layer.
+- **Ribosomal-protein detection** uses three checks against each
+  chain's description and UniProt name: the substring
+  `"ribosomal protein"`, the Ban-nomenclature long form
+  `"ribosomal subunit protein"` (e.g.
+  `"Large ribosomal subunit protein uL2m"`), and the Ban short-form
+  regex `^(uS|uL|bS|bL|eS|eL|mS|mL)\d+` (e.g. bare `"bL28m"` as used
+  in 3J9M). Known edge cases:
+  - **False positive**: `"Ribosomal protein S6 kinase"` (RPS6K, the
+    mTOR-pathway kinase) contains the literal substring and gets
+    flagged. Harmless in practice — RPS6K is rarely present in
+    ribosome assemblies and never sits near a tRNA CCA end.
+  - **False negative**: chains named just `"S1"` / `"L11"` with no
+    Ban-style prefix and no `"ribosomal"` substring are missed. Rare
+    in modern depositions, common in older entries. Broader §8.4
+    regex catches these for the superkingdom vote, but the
+    `is_ribosomal_protein` flag stays on the narrow rule.
 
 v1 out-of-scope:
 
@@ -303,10 +300,6 @@ v1 out-of-scope:
 - Ribosome fragments and partial assemblies missing either SSU or LSU.
 - Entries solved only by NMR.
 - Advanced tRNA state labels beyond the existing contact-based scheme.
-
-A PDB entry may contain multiple biological assemblies (e.g. 4V5Q has
-two), and each assembly is annotated independently — every assembly
-represents one complete ribosome.
 
 ## Caching
 
