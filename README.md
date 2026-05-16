@@ -302,10 +302,11 @@ v1 out-of-scope:
 - Archaeal ribosomes (skipped with `archaeal_ribosome_not_supported`).
 - Ribosome fragments and partial assemblies missing either SSU or LSU.
 - Entries solved only by NMR.
-- Multiple complete ribosomes packed into one biological assembly.
-- Complex symmetry / operator expansion beyond what the deposited
-  biological assembly already contains.
 - Advanced tRNA state labels beyond the existing contact-based scheme.
+
+A PDB entry may contain multiple biological assemblies (e.g. 4V5Q has
+two), and each assembly is annotated independently — every assembly
+represents one complete ribosome.
 
 ## Caching
 
