@@ -374,4 +374,4 @@ external APIs (RCSB / PDBe / BGSU / Rfam).
 
 ## License
 
-MIT.
+Apache License 2.0 — see [`LICENSE`](./LICENSE).
