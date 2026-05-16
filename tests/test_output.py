@@ -301,15 +301,17 @@ def test_assembly_csv_emits_unmapped_rna_chains() -> None:
 
 
 def test_assembly_csv_v1_extension_rows_appended() -> None:
-    """v1 adds ribosome_classification, dominant_superkingdom, and warning
-    rows at the end (per §15.3 to preserve byte-stable prefix vs prototype)."""
+    """v1 adds ribosome_classification and dominant_superkingdom rows at the
+    end. Warnings are intentionally NOT emitted to the CSV — they are
+    diagnostics, not tabular data, and remain available via the JSON
+    output and the live log stream."""
     rows = output.assembly_csv_rows(_bacterial_annotated())
     properties = [r["property"] for r in rows]
-    # Last few rows are the v1-extension rows in this order.
     assert "ribosome_classification" in properties
     assert "dominant_superkingdom" in properties
-    assert "warning" in properties
-    # Verify they come after the legacy properties.
+    # Warnings must not leak into the CSV.
+    assert "warning" not in properties
+    # Verify the v1 extensions come after the legacy properties.
     last_legacy = max(
         i
         for i, prop in enumerate(properties)
@@ -319,7 +321,7 @@ def test_assembly_csv_v1_extension_rows_appended() -> None:
     first_extension = min(
         i
         for i, prop in enumerate(properties)
-        if prop in {"ribosome_classification", "dominant_superkingdom", "warning"}
+        if prop in {"ribosome_classification", "dominant_superkingdom"}
     )
     assert last_legacy < first_extension
 

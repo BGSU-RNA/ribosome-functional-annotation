@@ -266,7 +266,7 @@ write_chain_csv(annotations, Path("chain.csv"))
 | JSON | Default, or `--output foo.json` | Full `RibosomeAnnotation` list. Field layout in `models.py`. |
 | JSONL | `--output foo.jsonl` | One annotation per line. For streaming consumers. |
 | `ribosome_chain_annotation.csv` | Default companion (suppress with `--no-csv`) | One row per annotated assembly, 13 columns. Matches the legacy prototype byte-for-byte. |
-| `ribosome_assembly_annotation.csv` | Default companion | One row per `(property, value)` tuple: species, non-ribosomal proteins, bound ligands, unmapped RNA chains, plus v1 extensions (classification, superkingdom, warnings). |
+| `ribosome_assembly_annotation.csv` | Default companion | One row per `(property, value)` tuple: species, non-ribosomal proteins, bound ligands, unmapped RNA chains, plus v1 extensions (classification, superkingdom). Warnings are NOT written to CSV — they remain in the JSON output and the live log stream. |
 
 Skipped and failed annotations appear in JSON but are omitted from CSV.
 

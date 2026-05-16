@@ -193,9 +193,13 @@ def assembly_csv_rows(annotation: RibosomeAnnotation) -> list[dict[str, str]]:
 
     Row order matches the prototype: ``species_name`` first, then per-chain
     ``non_ribosomal_proteins`` rows, then ``bound_ligands``, then
-    ``unmapped_rna_chains``. The v1-only ``ribosome_classification``,
-    ``dominant_superkingdom``, and ``warning`` rows are appended at the
-    end so prefix bytes match the legacy fixture.
+    ``unmapped_rna_chains``. The v1-only ``ribosome_classification`` and
+    ``dominant_superkingdom`` rows are appended at the end.
+
+    Warnings are intentionally NOT emitted to the CSV — they are
+    diagnostics, not tabular data, and would inflate row counts
+    unpredictably per assembly. They remain available via the JSON
+    output (``annotation.warnings``) and the live log stream.
     """
     pdb_id = annotation.pdb_id
     assembly_id = annotation.assembly_id or ""
@@ -235,8 +239,6 @@ def assembly_csv_rows(annotation: RibosomeAnnotation) -> list[dict[str, str]]:
     dominant = annotation.classification_evidence.get("dominant_ribosomal_protein_superkingdom")
     if isinstance(dominant, str) and dominant:
         rows.append(_row("", "dominant_superkingdom", dominant))
-    for warning in annotation.warnings:
-        rows.append(_row("", "warning", warning))
 
     return rows
 
