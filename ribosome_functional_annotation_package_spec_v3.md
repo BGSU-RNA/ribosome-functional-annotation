@@ -197,7 +197,11 @@ For each input PDB ID:
    10. Use Gemmi to find neighbouring chains within 5 Å of mapped reference nucleotides.
    11. Infer mRNA, A-tRNA, P-tRNA, and E-tRNA chains.
    12. Infer tRNA states from SSU/LSU contact patterns.
-   13. Emit structured annotation output.
+   13. Attach RADdb large-scale movement metrics
+       (`intersubunit_rotation`, `ssu_head_rotation`) for the
+       assembly's `(pdb_id, lsu_chain_id, ssu_chain_id)` triple —
+       see §29.
+   14. Emit structured annotation output.
 
 ## 5. Required external data sources
 
@@ -605,6 +609,17 @@ Use biological assembly mmCIF files where possible. The coordinate source should
 - `url`: read from a user-provided coordinate URL.
 
 Gemmi should be used for parsing coordinates and performing neighbour searches.
+
+### 5.5 RADdb LSU↔SSU CSV (large-scale movement metrics)
+
+A weekly snapshot of inter-subunit + SSU-head rotation /
+translation parameters for every public ribosome assembly,
+published at
+`https://radtool.rc.northeastern.edu/public_database/RADdb.<YYYYMMDD>.LSUSSU.csv`.
+Used to attach two motion metrics
+(`intersubunit_rotation`, `ssu_head_rotation`) to each annotated
+assembly. See §29 for the full local-cache + refresh policy, the
+match-key rules, and the JSON output schema.
 
 ## 6. Reference data
 
@@ -1203,6 +1218,10 @@ class RibosomeAnnotation(BaseModel):
 
     non_ribosomal_proteins: list[ChainRef] = []
     bound_ligands: list[LigandRef] = []
+    # RADdb-derived large-scale movement metrics (§29). Always emitted
+    # for annotated assemblies — null when RADdb is unavailable or the
+    # (pdb, lsu, ssu) triple doesn't match a RADdb row.
+    large_scale_movements: LargeScaleMovements | None = None
     classification_evidence: dict = {}
     warnings: list[str] = []
 
@@ -1977,7 +1996,10 @@ Implement a cache layer for:
 
 - RCSB GraphQL API responses.
 - BGSU correspondence API responses.
+- PDBe Rfam-mapping responses (§28.1).
 - Downloaded coordinate (assembly mmCIF) files.
+- The RADdb LSU↔SSU CSV plus its metadata sidecar (§29 — separate
+  refresh policy: 7-day weekly window, not content-addressed).
 
 Default cache directory:
 
@@ -1999,8 +2021,16 @@ Use deterministic file-system keys:
 ```text
 rcsb/<pdb_id_lower>.json
 bgsu/<sha256(query_url)>.json
+pdbe/<pdb_id_lower>.json
 coords/<pdb_id_lower>-assembly<n>.cif.gz
+raddb/RADdb.LSUSSU.csv
+raddb/RADdb.LSUSSU.metadata.json
 ```
+
+The `raddb/` namespace uses a fixed filename (not content-addressed)
+because the package keeps a single rolling copy of the upstream
+weekly release. See §29.3 for the metadata sidecar schema and §29.4
+for the refresh policy.
 
 ### 17.2 Invalidation policy (v1)
 
@@ -2168,7 +2198,8 @@ ribosome-state-annotator/
 │       ├── correspondence.py
 │       ├── infer.py
 │       ├── output.py
-│       └── cache.py
+│       ├── cache.py
+│       └── raddb.py
 ├── tests/
 │   ├── test_unit_id_parser.py
 │   ├── test_classification.py
@@ -2621,6 +2652,416 @@ implied):
   list + scope + resolution + depth + format.
 - `pdbe/` — PDBe Rfam-mapping responses (per §28.1), keyed by PDB ID.
 - `coords/` — mmCIF coordinate files, keyed by PDB ID + assembly ID.
+- `raddb/` — Cached RADdb LSU↔SSU CSV plus its metadata sidecar
+  (per §29). Refreshed weekly on a separate policy from the other four
+  namespaces.
 
 The `CacheInfo` summary surface (§17) reports the per-namespace entry
-count for all four.
+count for all five.
+
+## 29. RADdb integration (large-scale ribosome movement metrics)
+
+This section is the authoritative spec for the RADdb integration that
+annotates each ribosome assembly with the canonical inter-subunit and
+SSU-head rotation angles. RADdb is the only data source in the
+package that is **periodic** (not content-addressed): the upstream
+file is regenerated weekly and the package transparently keeps a
+local copy fresh.
+
+### 29.1 Goal
+
+For every annotated assembly, surface the two most widely-used
+RADdb-derived motion metrics:
+
+- `intersubunit_rotation` — the canonical ratchet-like inter-subunit
+  rotation (RADdb column `body rot.`).
+- `ssu_head_rotation` — the SSU-head swivel that gates translocation
+  (RADdb column `head rot.`).
+
+These two angles are sufficient to compare ribosome conformations
+across structures and are biologically interpretable on their own.
+RADdb's remaining columns (tilt, translation, directionality) are
+loaded into memory but **not** exposed in v1 — they may surface in a
+future version for advanced analysis / clustering / ML use cases.
+
+### 29.2 Source
+
+```text
+https://radtool.rc.northeastern.edu/public_database/RADdb.<YYYYMMDD>.LSUSSU.csv
+```
+
+The `<YYYYMMDD>` segment is the release date and changes weekly. The
+implementation must NOT hard-code any single date. See §29.5 for the
+latest-URL discovery procedure.
+
+### 29.3 Local cache layout
+
+The RADdb cache lives under the existing user-cache root introduced
+in §17:
+
+```text
+~/.cache/ribosome-state-annotator/raddb/
+├── RADdb.LSUSSU.csv
+└── RADdb.LSUSSU.metadata.json
+```
+
+The sidecar metadata file uses the following schema:
+
+```json
+{
+  "source_url": "https://radtool.rc.northeastern.edu/public_database/RADdb.20260508.LSUSSU.csv",
+  "downloaded_at": "2026-05-17T16:42:16+00:00",
+  "rad_date": "20260508",
+  "local_file": "RADdb.LSUSSU.csv"
+}
+```
+
+`downloaded_at` is ISO-8601 UTC with second resolution; `rad_date` is
+the `YYYYMMDD` substring of the source URL.
+
+### 29.4 Refresh policy
+
+At the start of every annotation run:
+
+1. If the local CSV is missing → attempt to download the latest
+   available release (see §29.5).
+2. If the local CSV is present and its `downloaded_at` is **less than
+   7 days** old → use the cached file; no network call.
+3. If the local CSV is present and **≥ 7 days** old → probe the
+   upstream server for a newer release. Download if newer; otherwise
+   keep using the cached file and log a warning.
+4. If the user passes `--refresh-raddb` (CLI) or `refresh_raddb=True`
+   (library) → unconditionally probe for a newer release regardless
+   of cache age.
+5. If any network step fails:
+   - With a cached file present → fall back to the cached file and
+     log a warning; the annotation pipeline continues with the
+     potentially stale metrics.
+   - Without a cached file → continue with `large_scale_movements`
+     emitted in the **unavailable** shape (see §29.8).
+
+**Hard requirement:** RADdb integration MUST NEVER crash the
+annotation pipeline. Every failure path degrades to null metrics.
+
+### 29.5 Latest-URL discovery
+
+To find the newest available RADdb release without an authoritative
+index:
+
+1. Generate candidate dates by walking backwards from today (UTC)
+   for at most **60 days**.
+2. Format each candidate as `YYYYMMDD` and substitute into the URL
+   template above.
+3. Issue an HTTP `HEAD` request for each candidate URL (cheap, no
+   body transfer).
+4. The first URL that responds `200 OK` is the latest release.
+5. If no candidate within the window responds `200` → return `None`
+   and degrade per §29.4 step 5.
+
+`HEAD` is preferred over `GET` because RADdb files are ~500 KB and
+the probe is run at every annotation startup beyond the 7-day
+window.
+
+### 29.6 CSV parsing
+
+The CSV has a single header row with the following columns relevant
+to v1:
+
+| Column | Type | Maps to |
+|--------|------|---------|
+| `RCSB` | string (uppercase 4-character PDB ID) | match key |
+| `LSU chain ID` | string (case-sensitive) | match key |
+| `SSU chain ID` | string (case-sensitive) | match key |
+| `body rot.` | float (degrees) | `intersubunit_rotation` |
+| `head rot.` | float (degrees) | `ssu_head_rotation` |
+
+Note the trailing periods on `body rot.` / `head rot.` — preserve
+them verbatim when reading the column.
+
+Required columns: all five above. If any is missing from the header,
+the implementation logs a warning and treats the dataset as
+unavailable (null metrics for every assembly).
+
+Numeric coercion: each value is stripped of whitespace, then
+`float()`-converted. Blank or non-numeric values yield `None` for
+that metric (the lookup still returns a row, but the per-metric
+field is null).
+
+### 29.7 Lookup keying and matching
+
+#### 29.7.1 Match key
+
+Each RADdb row is keyed by the triple:
+
+```text
+(pdb_id.upper(), lsu_chain_id, ssu_chain_id)
+```
+
+Rules:
+
+- **PDB ID** is uppercased before comparison (RADdb stores upper).
+- **Chain IDs** preserve exact case — `A` and `a` are distinct.
+- The implementation must NOT match by `assembly_id`. A PDB entry
+  with multiple biological assemblies has one RADdb row per
+  assembly, distinguished by the assembly's specific LSU + SSU
+  chain IDs. Example: 5J7L produces two rows, `(5J7L, DA, AA)` for
+  assembly 1 and `(5J7L, CA, BA)` for assembly 2, each with
+  different rotation values.
+
+#### 29.7.2 Lookup table
+
+When loading the CSV, build a dictionary keyed by the triple. This
+avoids repeated pandas-style filtering during batch runs:
+
+```python
+{
+    ("5J7L", "DA", "AA"): {
+        "intersubunit_rotation": 5.8,
+        "ssu_head_rotation": 9.4,
+        ...
+    },
+    ("5J7L", "CA", "BA"): {
+        "intersubunit_rotation": -0.6,
+        "ssu_head_rotation": 5.9,
+        ...
+    },
+}
+```
+
+Rows whose key is missing the PDB ID, LSU chain, or SSU chain are
+skipped silently.
+
+#### 29.7.3 Duplicate keys
+
+If two or more rows share the same `(pdb, lsu, ssu)` key:
+
+- A warning is logged at load time (`raddb_duplicate_keys`).
+- Subsequent lookups for that key return `None` (null metrics)
+  rather than silently picking one row.
+
+#### 29.7.4 Per-assembly lookup
+
+For each annotated assembly:
+
+1. Take the assembly's SSU main rRNA chain `auth_asym_id` and LSU
+   main rRNA chain `auth_asym_id`.
+2. Look up the triple `(annotation.pdb_id.upper(),
+   lsu_chain.auth_asym_id, ssu_chain.auth_asym_id)`.
+3. On a unique match → populate `large_scale_movements` with the
+   row's metrics + the cached file's `rad_date`.
+4. On a miss → emit `large_scale_movements` with non-null
+   `rad_date` (since the dataset is loaded) and null metrics. Log
+   an `info` message.
+5. **Multi-chain assemblies** (more than one SSU or LSU main rRNA
+   chain — rare; organellar fragments or double-ribosome packing):
+   try every (lsu, ssu) pair the assembly contains and return
+   metrics only when **exactly one** pair matches a RADdb row.
+   Otherwise emit null metrics and add a
+   `raddb_ambiguous_chain_pair` warning.
+
+### 29.8 JSON output schema
+
+Add a `large_scale_movements` block to each annotated assembly's
+JSON object. The block is **always emitted** for annotated assemblies
+— never absent — so the consumer schema is stable across runs.
+
+Three shapes:
+
+```jsonc
+// Match found
+"large_scale_movements": {
+  "source": "RADdb",
+  "rad_date": "20260508",
+  "intersubunit_rotation": 5.8,
+  "ssu_head_rotation": 9.4
+}
+
+// RADdb dataset loaded, but no row matches this (pdb, lsu, ssu) triple
+"large_scale_movements": {
+  "source": "RADdb",
+  "rad_date": "20260508",
+  "intersubunit_rotation": null,
+  "ssu_head_rotation": null
+}
+
+// RADdb dataset entirely unavailable (no cache + download failed)
+"large_scale_movements": {
+  "source": "RADdb",
+  "rad_date": null,
+  "intersubunit_rotation": null,
+  "ssu_head_rotation": null
+}
+```
+
+Skipped / failed annotations do NOT carry the
+`large_scale_movements` block (it is irrelevant when no rRNA chains
+were assigned).
+
+`large_scale_movements` is **not** mirrored into the chain-level or
+assembly-level CSV outputs in v1. It is JSON-only.
+
+### 29.9 API surface
+
+#### 29.9.1 Library
+
+```python
+annotate_pdb(
+    pdb_id: str,
+    *,
+    # ... existing params ...
+    raddb_dataset: RADdbDataset | None = None,
+    refresh_raddb: bool = False,
+    no_raddb: bool = False,
+) -> list[RibosomeAnnotation]
+```
+
+- `raddb_dataset` — pre-loaded dataset; takes precedence over the
+  refresh path. Useful for batch runs that want to share one load
+  across many calls.
+- `refresh_raddb` — force an online check at the start of the call
+  (overrides the 7-day window). No-op when `raddb_dataset` is
+  supplied.
+- `no_raddb` — skip RADdb integration entirely. The JSON still
+  emits `large_scale_movements` in the unavailable shape so the
+  schema stays stable.
+
+`annotate_many` accepts the same three parameters; it loads RADdb
+once at the start of the batch and passes the dataset through to
+every per-entry `annotate_pdb` call (cost: one load per batch, not
+one per entry).
+
+#### 29.9.2 CLI
+
+Add to both `annotate` and `annotate-batch`:
+
+```text
+--refresh-raddb     Force an online check for a newer RADdb release.
+```
+
+Add a new `raddb` subcommand group with two commands:
+
+```bash
+ribostate raddb info       # show cached rad_date, downloaded_at, file size
+ribostate raddb refresh    # force a check + download if newer; --force re-downloads
+```
+
+The `ribostate cache info` output gains a `raddb` row showing the
+file count in the RADdb cache namespace.
+
+### 29.10 Module layout
+
+The integration lives in one new module:
+
+```text
+src/ribosome_state_annotator/raddb.py
+```
+
+Recommended public surface:
+
+```python
+get_raddb_cache_dir(cache_root: Path | None = None) -> Path
+get_local_raddb_csv_path(cache_root: Path | None = None) -> Path
+get_local_raddb_metadata_path(cache_root: Path | None = None) -> Path
+
+load_raddb_metadata(cache_root=None) -> RADdbMetadata | None
+save_raddb_metadata(metadata, cache_root=None) -> Path
+
+find_latest_raddb_url(*, client=None, today=None, lookback_days=60)
+    -> tuple[str, str] | None    # (url, rad_date_YYYYMMDD)
+
+download_raddb_csv(url, rad_date, *, cache_root=None, client=None)
+    -> tuple[Path, RADdbMetadata]
+
+ensure_raddb_available(*, cache_root=None, force_refresh=False,
+                       client=None, now=None) -> RADdbMetadata | None
+
+load_raddb_table(*, cache_root=None, csv_path=None)
+    -> list[dict[str, str]] | None
+
+build_raddb_lookup(rows) -> tuple[dict, frozenset]
+load_raddb_dataset(*, cache_root=None, metadata=None) -> RADdbDataset | None
+get_motion_metrics(dataset, pdb_id, lsu_chain_id, ssu_chain_id)
+    -> dict | None
+```
+
+The `RADdbDataset` dataclass carries the metadata, the lookup dict,
+and the frozenset of duplicate keys.
+
+The corresponding Pydantic model lives in `models.py`:
+
+```python
+class LargeScaleMovements(BaseModel):
+    source: Literal["RADdb"] = "RADdb"
+    rad_date: str | None = None
+    intersubunit_rotation: float | None = None
+    ssu_head_rotation: float | None = None
+```
+
+and `RibosomeAnnotation` gains:
+
+```python
+large_scale_movements: LargeScaleMovements | None = None
+```
+
+### 29.11 Logging
+
+Required `INFO`-level events:
+
+- RADdb file exists / missing
+- checking latest RADdb version
+- downloading RADdb (with size + destination)
+- using cached RADdb (with rad_date + downloaded date)
+- RADdb match found / not found per assembly
+
+Required `WARNING`-level events:
+
+- RADdb download / probe failure
+- stale RADdb cache but no newer release in the lookback window
+- duplicate `(pdb, lsu, ssu)` keys in the CSV
+- missing required columns in the CSV
+- ambiguous chain-pair match (multi-chain assemblies, §29.7.4 step 5)
+
+### 29.12 Implementation requirements
+
+- Use the package's existing `httpx` client for all network calls
+  (do not introduce `requests`).
+- Use stdlib `csv` for parsing (the file is ~500 KB / ~2k rows;
+  pandas would add a heavy dependency for no benefit). The optional
+  `pandas` extra remains available for downstream consumers.
+- All public helpers must have docstrings and full typing.
+- All failure paths must return `None` / null metrics rather than
+  raising. RADdb integration MUST remain optional and robust.
+
+### 29.13 Tests
+
+Coverage requirements (all unit tests, no live network calls):
+
+1. No local file → triggers download.
+2. Local file < 7 days old → uses cache; no HTTP calls.
+3. Local file ≥ 7 days old → probes for newer; downloads if newer.
+4. Probe / download failure with cached file present → returns
+   cached metadata; pipeline continues.
+5. Probe / download failure without a cached file → returns `None`;
+   downstream emits the "unavailable" JSON shape.
+6. Column mapping verifies `body rot.` → `intersubunit_rotation`
+   and `head rot.` → `ssu_head_rotation`.
+7. Match key uses `(pdb_id.upper(), lsu_chain_id, ssu_chain_id)`,
+   chain case preserved.
+8. Duplicate keys → warning at load + null metrics at lookup.
+9. Missing required columns → warning + dataset treated as
+   unavailable.
+10. PDB ID uppercase normalization works for lowercased input.
+
+Additionally, `tests/conftest.py` must redirect the RADdb cache
+root to an isolated tmp directory via an autouse fixture so a
+developer's pre-existing
+`~/.cache/ribosome-state-annotator/raddb/` does not contaminate
+the test suite.
+
+### 29.14 References
+
+See `REFERENCES.md` for the RADtool / RADdb methodology citation
+(Mears *et al.* 2002 and the RADtool project page). The metric
+naming follows the established ribosome-conformation literature:
+`body rot.` is the canonical inter-subunit ratchet rotation;
+`head rot.` is the SSU-head swivel.
