@@ -28,6 +28,13 @@ from ribosome_state_annotator.output import (
     write_json,
     write_jsonl,
 )
+from ribosome_state_annotator.raddb import (
+    ensure_raddb_available,
+    get_local_raddb_csv_path,
+    get_local_raddb_metadata_path,
+    list_raddb_files,
+    load_raddb_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +53,14 @@ cache_app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(cache_app, name="cache")
+
+raddb_app = typer.Typer(
+    name="raddb",
+    help="Inspect or refresh the cached RADdb large-scale-movement table.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(raddb_app, name="raddb")
 
 stdout_console = Console()
 
@@ -342,6 +357,13 @@ def annotate(
             help="Local mmCIF (.cif or .cif.gz) instead of downloading from RCSB.",
         ),
     ] = None,
+    refresh_raddb: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-raddb",
+            help="Force an online check for a newer RADdb release (default: refresh weekly).",
+        ),
+    ] = False,
     quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
@@ -358,6 +380,7 @@ def annotate(
         strict_complete_check=strict,
         coordinate_source=coordinate_source,
         local_coordinate_path=local_path,
+        refresh_raddb=refresh_raddb,
     )
     _emit_annotations(
         annotations,
@@ -430,6 +453,13 @@ def annotate_batch(
             help="Fail rather than auto-creating missing parent directories for --output.",
         ),
     ] = False,
+    refresh_raddb: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-raddb",
+            help="Force an online check for a newer RADdb release (default: refresh weekly).",
+        ),
+    ] = False,
     quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
@@ -447,6 +477,7 @@ def annotate_batch(
         cache_dir=cache_dir,
         no_cache=no_cache,
         strict_complete_check=strict,
+        refresh_raddb=refresh_raddb,
     )
     _emit_annotations(
         annotations,
@@ -476,14 +507,19 @@ def cache_info(
     table = Table(title=f"ribostate cache @ {info.root}")
     table.add_column("Namespace")
     table.add_column("Entries", justify="right")
-    if not info.exists:
+    raddb_files = list_raddb_files(cache.root)
+    if not info.exists and raddb_files == 0:
         table.add_row("status", "[yellow]missing[/yellow]")
     else:
         table.add_row("rcsb", str(info.rcsb_entries))
         table.add_row("bgsu", str(info.bgsu_entries))
         table.add_row("pdbe", str(info.pdbe_entries))
         table.add_row("coords", str(info.coords_entries))
-        table.add_row("[bold]total entries", f"[bold]{info.total_entries}[/bold]")
+        table.add_row("raddb", str(raddb_files))
+        table.add_row(
+            "[bold]total entries",
+            f"[bold]{info.total_entries + raddb_files}[/bold]",
+        )
         table.add_row("total bytes", f"{info.total_bytes:,}")
     stdout_console.print(table)
 
@@ -511,6 +547,52 @@ def cache_clear(
             raise typer.Exit(code=1)
     cache.clear()
     _err(f"[green]cleared cache at {cache.root}[/green]")
+
+
+# ---------------------------------------------------------------------------
+# raddb info / raddb refresh
+# ---------------------------------------------------------------------------
+
+
+@raddb_app.command("info")
+def raddb_info() -> None:
+    """Show the cached RADdb file location, version, and download timestamp."""
+    metadata = load_raddb_metadata()
+    csv_path = get_local_raddb_csv_path()
+    meta_path = get_local_raddb_metadata_path()
+    table = Table(title="RADdb cache")
+    table.add_column("Field")
+    table.add_column("Value")
+    if metadata is None:
+        table.add_row("status", "[yellow]not cached[/yellow]")
+        table.add_row("csv_path", str(csv_path))
+        table.add_row("metadata_path", str(meta_path))
+    else:
+        table.add_row("rad_date", metadata.rad_date)
+        table.add_row("downloaded_at", metadata.downloaded_at.replace(microsecond=0).isoformat())
+        table.add_row("source_url", metadata.source_url)
+        table.add_row("csv_path", str(csv_path))
+        if csv_path.is_file():
+            table.add_row("csv_bytes", f"{csv_path.stat().st_size:,}")
+        else:
+            table.add_row("csv_bytes", "[red]missing[/red]")
+    stdout_console.print(table)
+
+
+@raddb_app.command("refresh")
+def raddb_refresh(
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-download even if the cache is already at the latest version."),
+    ] = False,
+) -> None:
+    """Check RADdb for a newer release and download it if available."""
+    _configure_logging(quiet=False, debug=False)
+    metadata = ensure_raddb_available(force_refresh=force)
+    if metadata is None:
+        _err("[red]RADdb unavailable: download failed and no cached file is present[/red]")
+        raise typer.Exit(code=1)
+    _err(f"[green]RADdb {metadata.rad_date} ready at {get_local_raddb_csv_path()}[/green]")
 
 
 # Silence "unused JSONL helper" warnings — render_jsonl is currently

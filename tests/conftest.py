@@ -315,3 +315,23 @@ def minimal_cif_gz_path(tmp_path: Path, minimal_cif_path: Path) -> Path:
 def minimal_cif_bytes(minimal_cif_path: Path) -> bytes:
     """Gzipped mmCIF bytes — the shape :func:`download_assembly_cif` returns."""
     return gzip.compress(minimal_cif_path.read_bytes())
+
+
+@pytest.fixture(autouse=True)
+def _isolate_raddb_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Redirect the RADdb cache to a fresh tmp dir for every test.
+
+    Without this, tests can pick up a pre-existing
+    ``~/.cache/ribosome-state-annotator/raddb/`` on the developer's
+    machine and silently use it — most importantly, a cached RADdb CSV
+    would cause ``annotate_pdb`` to attach real ``large_scale_movements``
+    data instead of staying deterministic. The Cache module's default
+    root is *not* redirected because existing :mod:`cache` tests verify
+    its identity directly.
+    """
+    from ribosome_state_annotator import raddb as raddb_module
+
+    isolated = tmp_path_factory.mktemp("isolated-raddb-cache")
+    monkeypatch.setattr(raddb_module, "DEFAULT_CACHE_ROOT", isolated)

@@ -104,6 +104,19 @@ class AssemblyContext(BaseModel):
     coordinate_path: Path | None = None
 
 
+class LargeScaleMovements(BaseModel):
+    """RADdb-derived large-scale ribosome motion metrics for one assembly.
+
+    Always emitted (with ``rad_date=None`` and null metrics) when RADdb
+    is unavailable, so the JSON schema stays stable across runs.
+    """
+
+    source: Literal["RADdb"] = "RADdb"
+    rad_date: str | None = None
+    intersubunit_rotation: float | None = None
+    ssu_head_rotation: float | None = None
+
+
 class CorrespondenceResult(BaseModel):
     """Output of the BGSU correspondence layer for one functional-site key
     (e.g. ``"ssu_atrna"``).
@@ -164,6 +177,10 @@ class RibosomeAnnotation(BaseModel):
 
     non_ribosomal_proteins: list[ChainRef] = Field(default_factory=list)
     bound_ligands: list[LigandRef] = Field(default_factory=list)
+    # RADdb-derived inter-subunit rotation + SSU head rotation (raddb spec).
+    # Always emitted (with null metrics) for annotated assemblies so the
+    # output schema stays stable whether RADdb is reachable or not.
+    large_scale_movements: LargeScaleMovements | None = None
     classification_evidence: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 

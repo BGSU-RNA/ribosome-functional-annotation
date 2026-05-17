@@ -328,6 +328,68 @@ def test_annotate_many_aggregates(ribosome_fixture: gemmi.Structure, tmp_path: P
 
 
 @respx.mock
+def test_annotate_pdb_attaches_large_scale_movements_when_dataset_matches(
+    ribosome_fixture: gemmi.Structure, tmp_path: Path
+) -> None:
+    """A RADdb dataset whose key matches the fixture's (pdb, lsu, ssu)
+    should populate ``large_scale_movements`` with non-null metrics."""
+    from datetime import datetime, timezone
+
+    from ribosome_state_annotator.models import LargeScaleMovements
+    from ribosome_state_annotator.raddb import (
+        RADdbDataset,
+        RADdbMetadata,
+        build_raddb_lookup,
+    )
+
+    cif_bytes = _ribosome_cif_bytes(ribosome_fixture, tmp_path)
+    _install_mocks(cif_bytes=cif_bytes)
+
+    lookup, dupes = build_raddb_lookup(
+        [
+            {
+                "RCSB": FIXTURE_PDB_ID,
+                "LSU chain ID": "L",
+                "SSU chain ID": "S",
+                "body rot.": "5.8",
+                "head rot.": "9.4",
+            }
+        ]
+    )
+    dataset = RADdbDataset(
+        metadata=RADdbMetadata(
+            source_url="https://example.test/RADdb.20260508.LSUSSU.csv",
+            downloaded_at=datetime(2026, 5, 8, tzinfo=timezone.utc),
+            rad_date="20260508",
+        ),
+        lookup=lookup,
+        duplicate_keys=dupes,
+    )
+
+    ann = api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True, raddb_dataset=dataset)[0]
+    assert isinstance(ann.large_scale_movements, LargeScaleMovements)
+    assert ann.large_scale_movements.rad_date == "20260508"
+    assert ann.large_scale_movements.intersubunit_rotation == 5.8
+    assert ann.large_scale_movements.ssu_head_rotation == 9.4
+
+
+@respx.mock
+def test_annotate_pdb_no_raddb_emits_null_metrics(
+    ribosome_fixture: gemmi.Structure, tmp_path: Path
+) -> None:
+    """``no_raddb=True`` skips integration entirely; the JSON block still
+    appears with ``rad_date=None`` for schema stability."""
+    cif_bytes = _ribosome_cif_bytes(ribosome_fixture, tmp_path)
+    _install_mocks(cif_bytes=cif_bytes)
+
+    ann = api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True, no_raddb=True)[0]
+    assert ann.large_scale_movements is not None
+    assert ann.large_scale_movements.rad_date is None
+    assert ann.large_scale_movements.intersubunit_rotation is None
+    assert ann.large_scale_movements.ssu_head_rotation is None
+
+
+@respx.mock
 def test_annotate_many_continue_on_error_catches_per_entry_failures() -> None:
     """When ``continue_on_error=True``, a per-PDB error becomes a failed
     annotation rather than aborting the whole batch."""

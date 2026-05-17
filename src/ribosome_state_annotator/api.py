@@ -73,12 +73,19 @@ from ribosome_state_annotator.models import (
     AssemblyContext,
     ChainRef,
     CorrespondenceResult,
+    LargeScaleMovements,
     LigandRef,
     RibosomeAnnotation,
 )
 from ribosome_state_annotator.pdbe_client import (
     fetch_rfam_mappings,
     parse_rfam_mappings,
+)
+from ribosome_state_annotator.raddb import (
+    RADdbDataset,
+    ensure_raddb_available,
+    get_motion_metrics,
+    load_raddb_dataset,
 )
 from ribosome_state_annotator.rcsb_client import (
     fetch_entry_payload,
@@ -110,6 +117,9 @@ def annotate_pdb(
     coordinate_source: CoordinateSource = "auto",
     local_coordinate_path: Path | None = None,
     client: httpx.Client | None = None,
+    raddb_dataset: RADdbDataset | None = None,
+    refresh_raddb: bool = False,
+    no_raddb: bool = False,
 ) -> list[RibosomeAnnotation]:
     """Annotate every biological assembly in one PDB entry.
 
@@ -129,6 +139,16 @@ def annotate_pdb(
         local_coordinate_path: Required when ``coordinate_source == "local"``.
         client: Optional shared :class:`httpx.Client`. When omitted, each
             sub-call opens and closes its own.
+        raddb_dataset: Pre-loaded RADdb dataset. When omitted, the
+            function loads it lazily on first use (and reuses it across
+            assemblies in this call). Pass an explicit dataset to share
+            it across many ``annotate_pdb`` calls in a batch.
+        refresh_raddb: Force an online check for a newer RADdb release
+            even if the local copy is fresh. No-op when ``raddb_dataset``
+            is supplied explicitly.
+        no_raddb: Skip RADdb integration entirely. The output JSON still
+            contains a ``large_scale_movements`` block with ``rad_date=None``
+            and null metrics so consumers see a stable schema.
 
     Returns:
         A list of :class:`RibosomeAnnotation` — one per processed assembly
@@ -192,6 +212,13 @@ def annotate_pdb(
         for assembly in assemblies:
             _augment_chain_rfam(assembly.rna_chains, rfam_by_chain)
 
+    if no_raddb:
+        resolved_raddb: RADdbDataset | None = None
+    elif raddb_dataset is not None:
+        resolved_raddb = raddb_dataset
+    else:
+        resolved_raddb = _load_raddb_safely(client=client, force_refresh=refresh_raddb)
+
     results: list[RibosomeAnnotation] = []
     for assembly in assemblies:
         results.append(
@@ -204,6 +231,7 @@ def annotate_pdb(
                 coordinate_source=coordinate_source,
                 local_coordinate_path=local_coordinate_path,
                 client=client,
+                raddb_dataset=resolved_raddb,
             )
         )
     return results
@@ -233,6 +261,10 @@ def annotate_many(
     pdb_ids: Iterable[str],
     *,
     continue_on_error: bool = True,
+    refresh_raddb: bool = False,
+    raddb_dataset: RADdbDataset | None = None,
+    no_raddb: bool = False,
+    client: httpx.Client | None = None,
     **kwargs: Any,
 ) -> list[RibosomeAnnotation]:
     """Batch wrapper. Iterates ``pdb_ids`` and calls :func:`annotate_pdb` on each.
@@ -241,14 +273,33 @@ def annotate_many(
     are caught and recorded as a ``status="failed"`` annotation rather
     than propagating. Pass ``continue_on_error=False`` to abort the
     batch on the first error instead.
+
+    ``refresh_raddb`` is honoured once at the start of the batch; the
+    resulting dataset (or the explicit ``raddb_dataset`` if supplied) is
+    threaded through every per-entry call so RADdb is loaded at most
+    once per batch.
     """
     aggregated: list[RibosomeAnnotation] = []
     pdb_ids_list = list(pdb_ids)
     total = len(pdb_ids_list)
+    if no_raddb:
+        resolved_raddb: RADdbDataset | None = None
+    elif raddb_dataset is not None:
+        resolved_raddb = raddb_dataset
+    else:
+        resolved_raddb = _load_raddb_safely(client=client, force_refresh=refresh_raddb)
     for index, pdb_id in enumerate(pdb_ids_list, start=1):
         logger.info("[batch %d/%d] %s", index, total, pdb_id.upper())
         try:
-            aggregated.extend(annotate_pdb(pdb_id, **kwargs))
+            aggregated.extend(
+                annotate_pdb(
+                    pdb_id,
+                    client=client,
+                    raddb_dataset=resolved_raddb,
+                    no_raddb=no_raddb,
+                    **kwargs,
+                )
+            )
         except RibosomeAnnotatorError as exc:
             if not continue_on_error:
                 raise
@@ -279,6 +330,7 @@ def _annotate_one_assembly(
     coordinate_source: CoordinateSource,
     local_coordinate_path: Path | None,
     client: httpx.Client | None,
+    raddb_dataset: RADdbDataset | None = None,
 ) -> RibosomeAnnotation:
     pdb_id = assembly.pdb_id
     aid = assembly.assembly_id
@@ -404,6 +456,7 @@ def _annotate_one_assembly(
         assignments=assignments,
         states=states,
         warnings=warnings,
+        raddb_dataset=raddb_dataset,
     )
 
 
@@ -433,6 +486,7 @@ def _build_annotated_annotation(
     assignments: ChainAssignments,
     states: TRNAStates,
     warnings: list[str],
+    raddb_dataset: RADdbDataset | None = None,
 ) -> RibosomeAnnotation:
     # Compute other_rna_chains: RNA chains that weren't placed in any
     # OUTPUT bucket (rRNA roles + the four functional-chain slots).
@@ -469,6 +523,14 @@ def _build_annotated_annotation(
     # this function is robust when used outside the standard pipeline).
     bound_ligands = _dedupe_by_comp_id(bound_ligands)
 
+    large_scale_movements = _build_large_scale_movements(
+        pdb_id=assembly.pdb_id,
+        ssu_chains=list(by_role.get("ssu_main_rrna", [])),
+        lsu_chains=list(by_role.get("lsu_main_rrna", [])),
+        raddb_dataset=raddb_dataset,
+        warnings=warnings,
+    )
+
     return RibosomeAnnotation(
         pdb_id=assembly.pdb_id,
         assembly_id=assembly.assembly_id,
@@ -487,12 +549,75 @@ def _build_annotated_annotation(
         exit_trna_state=states.exit_trna_state,
         non_ribosomal_proteins=non_ribosomal_proteins,
         bound_ligands=bound_ligands,
+        large_scale_movements=large_scale_movements,
         classification_evidence={
             **classification_result.evidence,
             **states.trna_state_evidence,
         },
         warnings=warnings,
     )
+
+
+def _load_raddb_safely(
+    *, client: httpx.Client | None, force_refresh: bool
+) -> RADdbDataset | None:
+    """Best-effort RADdb load. Returns ``None`` on any failure.
+
+    The annotation pipeline must never crash because RADdb is missing or
+    unreachable — when this returns ``None``, downstream code emits
+    ``large_scale_movements`` with null metrics and ``rad_date=None``.
+    """
+    try:
+        metadata = ensure_raddb_available(client=client, force_refresh=force_refresh)
+    except Exception as exc:
+        logger.warning("RADdb refresh check failed: %s", exc)
+        return None
+    if metadata is None:
+        return None
+    try:
+        return load_raddb_dataset(metadata=metadata)
+    except Exception as exc:
+        logger.warning("RADdb dataset load failed: %s", exc)
+        return None
+
+
+def _build_large_scale_movements(
+    *,
+    pdb_id: str,
+    ssu_chains: list[ChainRef],
+    lsu_chains: list[ChainRef],
+    raddb_dataset: RADdbDataset | None,
+    warnings: list[str],
+) -> LargeScaleMovements:
+    """Resolve RADdb metrics for one assembly and return the JSON-shape block.
+
+    Multi-chain assemblies (>1 SSU or >1 LSU main rRNA chain): the
+    cartesian product of LSU x SSU is tried and metrics are returned only
+    when exactly one pair matches a RADdb row. Otherwise a warning is
+    recorded and the metrics fields are null.
+    """
+    rad_date = raddb_dataset.metadata.rad_date if raddb_dataset is not None else None
+    if raddb_dataset is None:
+        return LargeScaleMovements(rad_date=None)
+
+    matches: list[dict[str, Any]] = []
+    for lsu in lsu_chains:
+        for ssu in ssu_chains:
+            metrics = get_motion_metrics(
+                raddb_dataset, pdb_id, lsu.auth_asym_id, ssu.auth_asym_id
+            )
+            if metrics is not None:
+                matches.append(metrics)
+
+    if len(matches) == 1:
+        return LargeScaleMovements(
+            rad_date=rad_date,
+            intersubunit_rotation=matches[0]["intersubunit_rotation"],
+            ssu_head_rotation=matches[0]["ssu_head_rotation"],
+        )
+    if len(matches) > 1:
+        warnings.append("raddb_ambiguous_chain_pair")
+    return LargeScaleMovements(rad_date=rad_date)
 
 
 def _dedupe_by_comp_id(ligands: list[LigandRef]) -> list[LigandRef]:

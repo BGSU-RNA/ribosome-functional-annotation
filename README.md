@@ -64,6 +64,15 @@ large-subunit site:
   that subunit; `**` means contact was found but couldn't be labelled
   (typically a tRNA anticodon-stem-loop fragment too short to disambiguate).
 
+In addition to the per-tRNA functional state, each assembly is
+annotated with two **large-scale movement** metrics from the RAD
+database (Mears *et al.* / RADtool): the inter-subunit body rotation
+(`intersubunit_rotation`) and the SSU-head rotation
+(`ssu_head_rotation`). These two angles capture the ratchet-like
+inter-subunit rotation and the head-swivel that gate translocation,
+and are the standard descriptors used to compare ribosome
+conformations across structures.
+
 The PDB now contains thousands of ribosome structures spanning
 bacteria, archaea, and eukaryotes (cytoplasmic and organellar). Chain
 naming conventions vary widely across deposits, and identifying which
@@ -143,6 +152,11 @@ conserved positions.
         └────────────┬──────────────────────────────────────┘
                      ▼
         ┌───────────────────────────────────────────────────┐
+        │  RADdb LSU↔SSU motion metrics                     │
+        │  (auto-refreshed weekly; matched by chain triple) │
+        └────────────┬──────────────────────────────────────┘
+                     ▼
+        ┌───────────────────────────────────────────────────┐
         │  JSON  +  ribosome_chain_annotation.csv           │
         │        +  ribosome_assembly_annotation.csv        │
         └───────────────────────────────────────────────────┘
@@ -214,6 +228,8 @@ ribostate annotate 5UYM --input-file ./5uym-assembly1.cif
 ```bash
 ribostate cache info        # entry counts per namespace
 ribostate cache clear --yes # wipe everything
+ribostate raddb info        # show the cached RADdb version + download date
+ribostate raddb refresh     # force an online check for a newer RADdb release
 ```
 
 Output-path resolution:
@@ -235,6 +251,7 @@ Other useful flags:
 | `--no-cache` | Disable caching for this invocation. |
 | `--strict` | Skip (don't just warn) assemblies with low ribosomal-protein counts. |
 | `--input-file PATH` | Parse a local mmCIF instead of downloading from RCSB. |
+| `--refresh-raddb` | Force a fresh check for a newer RADdb release at the start of this run (default: refresh weekly). |
 | `--quiet` | Suppress INFO progress; warnings/errors only. |
 | `--debug` | DEBUG-level logging (includes HTTP traces). |
 
@@ -317,9 +334,41 @@ v1 out-of-scope:
 
 Every external call is cached on disk at
 `~/.cache/ribosome-state-annotator/` (override with `--cache-dir`,
-disable with `--no-cache`). Four namespaces: `rcsb/`, `bgsu/`, `pdbe/`,
-`coords/`. The cache is content-addressed and never expires — to
-refresh, use `ribostate cache clear` or delete the cache root.
+disable with `--no-cache`). Five namespaces: `rcsb/`, `bgsu/`, `pdbe/`,
+`coords/`, and `raddb/`. The first four are content-addressed and
+never expire — to refresh, use `ribostate cache clear` or delete the
+cache root.
+
+### RADdb large-scale movements
+
+The `raddb/` namespace stores a local copy of the [RADdb
+LSU↔SSU CSV](https://radtool.rc.northeastern.edu/) plus a small
+`metadata.json`. The package auto-refreshes weekly: at the start of
+any annotation run, if the local file is older than seven days the
+HEAD endpoint is probed for a newer release (walking back up to 60
+days). Force a check now with `ribostate raddb refresh` or
+`--refresh-raddb` on `annotate` / `annotate-batch`. Inspect the
+current state with `ribostate raddb info`.
+
+Each annotated assembly's JSON includes a
+`large_scale_movements` block. Lookup is per `(pdb_id.upper(),
+lsu_chain_id, ssu_chain_id)`, so multi-assembly PDBs (e.g. 5J7L) get
+different metrics per assembly. When RADdb is unreachable or the
+triple doesn't match, the block is still emitted with `rad_date: null`
+and null metrics so the schema stays stable:
+
+```json
+"large_scale_movements": {
+  "source": "RADdb",
+  "rad_date": "20260508",
+  "intersubunit_rotation": 5.8,
+  "ssu_head_rotation": 9.4
+}
+```
+
+Only `body rot.` and `head rot.` are surfaced in v1. The remaining
+RADdb columns (tilt, translation, directionality) are loaded into
+memory but not yet exposed.
 
 ## Package layout
 
@@ -341,6 +390,7 @@ of the contact-transfer workflow above.
 | `classify.py` | rRNA-core determination, ribosomal-protein detection, dominant-superkingdom vote, final classification rule. |
 | `infer.py` | Functional chain assignment + tRNA-state inference. Owns the polymer-filtered CCA-end selector for the A-site factor label. |
 | `cache.py` | Content-addressed on-disk cache with four namespaces: `rcsb/`, `bgsu/`, `pdbe/`, `coords/`. |
+| `raddb.py` | RADdb integration — download / refresh / parse the LSU↔SSU CSV, lookup motion metrics per `(pdb, lsu, ssu)` triple. |
 | `config.py` | Tunables: contact cutoff, completeness thresholds, network timeouts. |
 | `exceptions.py` | Typed exception hierarchy (`ApiRequestError`, `CorrespondenceMappingError`, `CoordinateDownloadError`, …). |
 | `output.py` | JSON / JSONL / CSV writers. |

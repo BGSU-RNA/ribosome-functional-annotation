@@ -130,6 +130,27 @@ biological examples:
   exercises the organellar-classification path, the missing-5S case,
   and the "tRNA without a canonical contact site" case.
 
+## Large-scale ribosome movements (RADdb)
+
+- **Mears, J. A., Cannone, J. J., Stagg, S. M., Gutell, R. R.,
+  Agrawal, R. K., & Harvey, S. C. (2002). Modeling a minimal ribosome
+  based on comparative sequence analysis.** *Journal of Molecular
+  Biology*, 321, 215–234. DOI:
+  [10.1016/S0022-2836(02)00568-5](https://doi.org/10.1016/S0022-2836(02)00568-5).
+  Foundational work for the rotation/tilt/translation decomposition
+  later refined by RADtool.
+- **Bonin, J. P., Aramini, J. M., Dunkle, J. A., & Harvey, S. C.
+  RADtool / RADdb (https://radtool.rc.northeastern.edu/).** The
+  package consumes RADdb's weekly LSUSSU CSV release, which decomposes
+  every PDB ribosome assembly's inter-subunit geometry into body and
+  head rotation/tilt/translation parameters. Two metrics are surfaced
+  in v1: **`body rot.` → `intersubunit_rotation`** (the canonical
+  ratchet-like inter-subunit rotation) and **`head rot.` →
+  `ssu_head_rotation`** (the SSU-head swivel that gates translocation).
+  Rows are joined to annotations by the `(pdb_id, lsu_chain_id,
+  ssu_chain_id)` triple, which is unique per ribosome assembly in
+  RADdb. See `raddb.py` for the local-cache / weekly-refresh policy.
+
 ## External APIs
 
 - **RCSB Data API (GraphQL).** <https://data.rcsb.org/index.html#data-api>.
@@ -144,5 +165,10 @@ biological examples:
   curated functional-site anchor nucleotides from a reference
   ribosome onto the equivalent positions in any query ribosome via
   Rfam covariance-model alignment.
+- **RADdb LSU↔SSU CSV.**
+  <https://radtool.rc.northeastern.edu/public_database/>. Weekly
+  release of inter-subunit + SSU-head rotation/tilt/translation
+  parameters for every public ribosome assembly; see the citation
+  above for the underlying methodology.
 - **Rfam.** <https://rfam.org/>. Source of the rRNA / tRNA family
   accessions consulted by `RFAM_ROLE_MAP` in `constants.py`.
