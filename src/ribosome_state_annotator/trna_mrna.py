@@ -28,7 +28,7 @@ import io
 import itertools
 import logging
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 
 import gemmi
 import httpx
@@ -487,50 +487,65 @@ def _reconstruct_codon_locally(
     return by_position
 
 
+# Offset in codons between sites along the mRNA, read 5' → 3'.
+# E is most upstream (smallest auth_seq_id), then P, then A (most downstream).
+# So inferring P from A is one codon upstream (offset -3 residues);
+# inferring A from E is two codons downstream (offset +6 residues); etc.
+_SITE_FRAME_INDEX: dict[Literal["A", "P", "E"], int] = {"E": 0, "P": 1, "A": 2}
+
+
 def _frame_inferred_codon(
     pdb_id: str,
     mrna_chain_id: str,
-    a_site_codon_residues: dict[int, CodonResidue],
-    site: Literal["P", "E"],
+    anchor_site: Literal["A", "P", "E"],
+    anchor_codon_residues: dict[int, CodonResidue],
+    target_site: Literal["A", "P", "E"],
     mrna_residues: list[gemmi.Residue],
     mrna_index_by_seq_id: dict[int, int],
 ) -> dict[int, CodonResidue] | None:
-    """Step the mRNA frame upstream from the A-site to infer P / E codons.
+    """Infer the ``target_site`` codon by stepping the mRNA frame from
+    a fully-resolved ``anchor_site`` codon.
 
-    Returns ``None`` if the A-site codon is incomplete or the mRNA
-    polymer doesn't have enough upstream residues.
+    Returns ``None`` if the anchor codon is incomplete, the target is
+    the same as the anchor, or the mRNA polymer doesn't have enough
+    upstream / downstream residues to span both codons as a single
+    gap-free run.
+
+    Inference geometry: codon position 1 of any site sits at the same
+    mRNA polymer position as codon position 1 of any other site, offset
+    by 3 residues per codon. With E < P < A along the mRNA (5' → 3'),
+    the polymer-index offset from anchor codon-position-1 to target
+    codon-position-1 is ``3 * (target_index - anchor_index)``.
     """
     from ribosome_state_annotator.correspondence import parse_unit_id
 
-    if len(a_site_codon_residues) < 3:
+    if target_site == anchor_site:
         return None
-    # Anchor on the A-site codon position 1 residue.
-    a_pos1 = a_site_codon_residues.get(1)
-    if a_pos1 is None:
+    if len(anchor_codon_residues) < 3:
+        return None
+    anchor_pos1 = anchor_codon_residues.get(1)
+    if anchor_pos1 is None:
         return None
     try:
-        a_pos1_seqnum = parse_unit_id(a_pos1.unit_id).residue_number
+        anchor_pos1_seqnum = parse_unit_id(anchor_pos1.unit_id).residue_number
     except ValueError:
         return None
-    a_pos1_polymer_idx = mrna_index_by_seq_id.get(a_pos1_seqnum)
-    if a_pos1_polymer_idx is None:
+    anchor_pos1_polymer_idx = mrna_index_by_seq_id.get(anchor_pos1_seqnum)
+    if anchor_pos1_polymer_idx is None:
         return None
 
-    # P-site is one codon (3 residues) upstream; E-site is two codons upstream.
-    # "Upstream" in mRNA means smaller polymer index because translation reads 5' to 3'
-    # and the upstream codon sits 5' of the A-site codon.
-    offset = -3 if site == "P" else -6
-    base_polymer_idx = a_pos1_polymer_idx + offset
+    codon_offset = _SITE_FRAME_INDEX[target_site] - _SITE_FRAME_INDEX[anchor_site]
+    base_polymer_idx = anchor_pos1_polymer_idx + 3 * codon_offset
     if base_polymer_idx < 0:
         return None
     if base_polymer_idx + 2 >= len(mrna_residues):
         return None
 
-    # Verify the inferred 3-residue triplet (and the gap up to the A-site
-    # codon) is one consecutive polymer run by auth_seq_id. If there's a
-    # gap, frame inference is unreliable.
-    span_first = base_polymer_idx
-    span_last = a_pos1_polymer_idx + 2  # through A-site codon position 3
+    # Verify the span from the leftmost involved residue to the rightmost
+    # is one consecutive polymer run by auth_seq_id. If there's a gap,
+    # frame inference is unreliable.
+    span_first = min(base_polymer_idx, anchor_pos1_polymer_idx)
+    span_last = max(base_polymer_idx + 2, anchor_pos1_polymer_idx + 2)
     span_residues = mrna_residues[span_first : span_last + 1]
     if not _is_consecutive_run(span_residues):
         return None
@@ -847,24 +862,37 @@ def extract_trna_mrna_interactions(
         if interaction is not None:
             per_site_interactions[site] = interaction
 
-    # Second pass: frame-inference for P / E sites whose codon is still
-    # incomplete, anchored on a complete A-site codon.
-    a_interaction = per_site_interactions.get("A")
-    if (
-        a_interaction is not None
-        and a_interaction.codon.assignment_status == "complete"
-        and has_long_run
-    ):
-        a_codon_residues = {r.codon_position: r for r in a_interaction.codon.residues}
-        for site in ("P", "E"):
+    # Second pass: frame-inference for any site whose codon is still
+    # incomplete, anchored on whichever site IS complete. Priority for
+    # the anchor: A → P → E. This generalises the A-anchored inference
+    # so cases like 5UYN (only P-site has FR3D evidence; A is held by
+    # EF-Tu pre-accommodation, E is post-translocation) still resolve
+    # the A and E codons by stepping the mRNA frame from the resolved
+    # P-codon.
+    anchor_site: Literal["A", "P", "E"] | None = None
+    for candidate_site in SITES:
+        interaction = per_site_interactions.get(candidate_site)
+        if interaction is not None and interaction.codon.assignment_status == "complete":
+            anchor_site = candidate_site
+            break
+
+    if anchor_site is not None and has_long_run:
+        anchor_codon_residues = {
+            r.codon_position: r
+            for r in per_site_interactions[anchor_site].codon.residues
+        }
+        for site in SITES:
+            if site == anchor_site:
+                continue
             existing = per_site_interactions.get(site)
             if existing is None or existing.codon.assignment_status == "complete":
                 continue
             inferred = _frame_inferred_codon(
                 pdb_id,
                 mrna_chain_id,
-                a_codon_residues,
-                cast(Literal["P", "E"], site),
+                anchor_site,
+                anchor_codon_residues,
+                site,
                 mrna_residues,
                 mrna_index_by_seq_id,
             )
@@ -874,10 +902,9 @@ def extract_trna_mrna_interactions(
             existing.codon.assignment_status = "complete"
             existing.codon.sequence = _codon_sequence(existing.codon.residues)
     elif not has_long_run:
-        # If we'd have liked to do frame inference but the mRNA is too
-        # short, surface that as a warning on any P / E sites we couldn't
-        # complete.
-        for site in ("P", "E"):
+        # If frame inference would have helped but the mRNA is too short,
+        # surface that as a warning on any site we couldn't complete.
+        for site in SITES:
             existing = per_site_interactions.get(site)
             if existing is not None and existing.codon.assignment_status != "complete":
                 existing.warnings.append("insufficient_mrna_for_frame_inference")

@@ -407,7 +407,7 @@ def test_reconstruct_codon_locally_empty_when_no_seed() -> None:
     assert _reconstruct_codon_locally(PDB, "V", {}, mrna_residues, mrna_index) == {}
 
 
-def test_frame_inferred_codon_p_site() -> None:
+def test_frame_inferred_codon_from_a_site_anchor_to_p_site() -> None:
     structure = _build_test_structure(mrna_residue_names=["A", "C", "G"] * 10)
     mrna_residues, mrna_index = _mrna_index(structure, "V")
     # A-site codon at polymer indices 18, 19, 20 (residues 19, 20, 21).
@@ -416,7 +416,7 @@ def test_frame_inferred_codon_p_site() -> None:
         2: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[19]), "C", 2, "fr3d_observed"),
         3: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[20]), "G", 3, "fr3d_observed"),
     }
-    inferred = _frame_inferred_codon(PDB, "V", a_codon, "P", mrna_residues, mrna_index)
+    inferred = _frame_inferred_codon(PDB, "V", "A", a_codon, "P", mrna_residues, mrna_index)
     assert inferred is not None
     # P-site = 3 residues upstream → polymer indices 15, 16, 17 → residues 16, 17, 18.
     assert inferred[1].unit_id.endswith("|16")
@@ -425,7 +425,7 @@ def test_frame_inferred_codon_p_site() -> None:
     assert all(r.source == "mrna_frame_inference" for r in inferred.values())
 
 
-def test_frame_inferred_codon_e_site() -> None:
+def test_frame_inferred_codon_from_a_site_anchor_to_e_site() -> None:
     structure = _build_test_structure(mrna_residue_names=["A", "C", "G"] * 10)
     mrna_residues, mrna_index = _mrna_index(structure, "V")
     a_codon = {
@@ -433,10 +433,43 @@ def test_frame_inferred_codon_e_site() -> None:
         2: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[19]), "C", 2, "fr3d_observed"),
         3: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[20]), "G", 3, "fr3d_observed"),
     }
-    inferred = _frame_inferred_codon(PDB, "V", a_codon, "E", mrna_residues, mrna_index)
+    inferred = _frame_inferred_codon(PDB, "V", "A", a_codon, "E", mrna_residues, mrna_index)
     assert inferred is not None
     # E-site = 6 residues upstream → polymer indices 12, 13, 14 → residues 13, 14, 15.
     assert inferred[1].unit_id.endswith("|13")
+
+
+def test_frame_inferred_codon_from_p_site_anchor_infers_a_and_e() -> None:
+    """5UYN-style: anchor on the P-site codon and infer both A and E."""
+    structure = _build_test_structure(mrna_residue_names=["A", "C", "G"] * 10)
+    mrna_residues, mrna_index = _mrna_index(structure, "V")
+    # P-site codon at polymer indices 15, 16, 17 (residues 16, 17, 18).
+    p_codon = {
+        1: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[15]), "A", 1, "fr3d_observed"),
+        2: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[16]), "C", 2, "fr3d_observed"),
+        3: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[17]), "G", 3, "fr3d_observed"),
+    }
+    # Infer A (downstream of P, +3 polymer indices).
+    a_inferred = _frame_inferred_codon(PDB, "V", "P", p_codon, "A", mrna_residues, mrna_index)
+    assert a_inferred is not None
+    assert a_inferred[1].unit_id.endswith("|19")
+    assert a_inferred[2].unit_id.endswith("|20")
+    assert a_inferred[3].unit_id.endswith("|21")
+    # Infer E (upstream of P, -3 polymer indices).
+    e_inferred = _frame_inferred_codon(PDB, "V", "P", p_codon, "E", mrna_residues, mrna_index)
+    assert e_inferred is not None
+    assert e_inferred[1].unit_id.endswith("|13")
+
+
+def test_frame_inferred_codon_returns_none_for_same_site() -> None:
+    structure = _build_test_structure(mrna_residue_names=["A", "C", "G"] * 10)
+    mrna_residues, mrna_index = _mrna_index(structure, "V")
+    a_codon = {
+        1: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[18]), "A", 1, "fr3d_observed"),
+        2: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[19]), "C", 2, "fr3d_observed"),
+        3: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[20]), "G", 3, "fr3d_observed"),
+    }
+    assert _frame_inferred_codon(PDB, "V", "A", a_codon, "A", mrna_residues, mrna_index) is None
 
 
 def test_frame_inferred_codon_none_when_run_too_short() -> None:
@@ -448,7 +481,7 @@ def test_frame_inferred_codon_none_when_run_too_short() -> None:
         2: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[3]), "A", 2, "fr3d_observed"),
         3: _make_codon_residue(_build_unit_id(PDB, "V", mrna_residues[4]), "A", 3, "fr3d_observed"),
     }
-    assert _frame_inferred_codon(PDB, "V", a_codon, "P", mrna_residues, mrna_index) is None
+    assert _frame_inferred_codon(PDB, "V", "A", a_codon, "P", mrna_residues, mrna_index) is None
 
 
 def _make_codon_residue(unit_id: str, base: str, codon_position: int, source: str):
@@ -615,6 +648,65 @@ def test_extract_frame_inference_fills_p_and_e_sites() -> None:
     # P codon should be 3 residues upstream of A (mRNA 16/17/18).
     assert by_site["P"].codon.residues[0].unit_id.endswith("|16")
     assert by_site["E"].codon.residues[0].unit_id.endswith("|13")
+
+
+@respx.mock
+def test_extract_frame_inference_anchors_on_p_site_when_a_is_missing() -> None:
+    """5UYN-style: P-tRNA has FR3D pairs, A-tRNA does not (pre-accommodation).
+    Frame inference should fall back to the P-site as anchor and resolve the
+    A and E codons by stepping the mRNA frame."""
+    structure = gemmi.Structure()
+    structure.name = PDB
+    model = gemmi.Model("1")
+    for chain_id in ("Y", "W", "Z"):
+        chain = gemmi.Chain(chain_id)
+        for i in range(1, 77):
+            chain.add_residue(_make_residue("A", i))
+        model.add_chain(chain)
+    mrna_chain = gemmi.Chain("V")
+    for i, base in enumerate(["A", "C", "G"] * 12, start=1):
+        mrna_chain.add_residue(_make_residue(base, i))
+    model.add_chain(mrna_chain)
+    structure.add_model(model)
+    structure.cell = gemmi.UnitCell(200.0, 200.0, 200.0, 90.0, 90.0, 90.0)
+
+    def chain_ref(auth: str) -> ChainRef:
+        return ChainRef(pdb_id=PDB, assembly_id="1", auth_asym_id=auth, polymer_type="RNA")
+
+    ann = RibosomeAnnotation(pdb_id=PDB, assembly_id="1", status="annotated")
+    ann.mrna_chain = chain_ref("V")
+    ann.aminoacyl_trna_chain = chain_ref("Y")
+    ann.peptidyl_trna_chain = chain_ref("W")
+    ann.exit_trna_chain = chain_ref("Z")
+
+    # Only the P-site (chain W) has FR3D cWW pairs. Place them at mRNA
+    # positions 16/17/18 so the inferred A-codon is at 19/20/21 and the
+    # inferred E-codon at 13/14/15.
+    csv_body = (
+        b'"TEST|1|V|A|16","cWW","TEST|1|W|A|36"\n'
+        b'"TEST|1|V|C|17","cWW","TEST|1|W|A|35"\n'
+        b'"TEST|1|V|G|18","cWW","TEST|1|W|A|34"\n'
+    )
+    url = FR3D_BASEPAIRS_URL_TEMPLATE.format(pdb_id="test")
+    respx.get(url).mock(return_value=httpx.Response(200, content=csv_body))
+
+    interactions = extract_trna_mrna_interactions(ann, structure)
+    by_site = {i.site: i for i in interactions}
+
+    # P codon comes directly from FR3D.
+    assert by_site["P"].codon.assignment_status == "complete"
+    assert by_site["P"].codon.residues[0].source == "fr3d_observed"
+
+    # A and E codons are filled by frame inference, anchored on P.
+    assert by_site["A"].codon.assignment_status == "complete"
+    assert all(r.source == "mrna_frame_inference" for r in by_site["A"].codon.residues)
+    assert by_site["A"].codon.residues[0].unit_id.endswith("|19")
+    assert by_site["A"].codon.residues[2].unit_id.endswith("|21")
+
+    assert by_site["E"].codon.assignment_status == "complete"
+    assert all(r.source == "mrna_frame_inference" for r in by_site["E"].codon.residues)
+    assert by_site["E"].codon.residues[0].unit_id.endswith("|13")
+    assert by_site["E"].codon.residues[2].unit_id.endswith("|15")
 
 
 @respx.mock

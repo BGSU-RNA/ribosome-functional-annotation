@@ -3348,21 +3348,45 @@ Mark reconstructed residues as `source: "mmcif_reconstructed"`.
 
 #### 30.8.4 Tertiary source: mRNA frame inference
 
-If the A-site codon is fully resolved (either FR3D-observed or
-FR3D+reconstruct), the P and E codons can be inferred by stepping the
-mRNA polymer-order frame upstream by 1 codon (P) and 2 codons (E):
+If **any** site (A, P, or E) is fully resolved (either FR3D-observed
+or FR3D + locally reconstructed), the other two sites can be
+inferred by stepping the mRNA polymer-order frame. Along the mRNA
+read 5' → 3', the three sites are ordered **E < P < A**, with one
+codon (3 residues) between each adjacent pair. The polymer-index
+offset from the anchor site's codon position 1 to the target site's
+codon position 1 is:
 
-- P-site codon position 1 = A-site codon position 1 − 3 polymer indices.
-- E-site codon position 1 = A-site codon position 1 − 6 polymer indices.
+```text
+offset = 3 * (target_index - anchor_index)
+```
 
-This is permitted only if the relevant mRNA polymer run is
-**continuous** by `auth_seq_id` (no gaps). The implementation must
-also check that the mRNA chain has at least **9 consecutive polymer
-residues** before attempting frame inference at all — otherwise mark
-the P / E codons as incomplete and add the warning
-`insufficient_mrna_for_frame_inference`.
+where `_SITE_FRAME_INDEX = {"E": 0, "P": 1, "A": 2}`. Examples:
 
-Mark frame-inferred residues as `source: "mrna_frame_inference"`.
+- Anchor A → P: offset = `3 * (1 - 2) = -3` (3 residues upstream).
+- Anchor A → E: offset = `3 * (0 - 2) = -6` (6 residues upstream).
+- Anchor P → A: offset = `3 * (2 - 1) = +3` (3 residues downstream).
+- Anchor P → E: offset = `3 * (0 - 1) = -3` (3 residues upstream).
+
+The implementation selects the anchor in canonical A → P → E priority
+order — the most-A-side resolved site is preferred because in routine
+elongation states the A-site codon is most likely to carry direct
+FR3D evidence. The P-anchored case rescues pre-accommodation states
+(e.g. PDB 5UYN, where the A-tRNA is held by EF-Tu and lacks
+Watson-Crick contacts to the codon while the P-site is firmly
+resolved): anchoring on P, the inferred A and E codons are
+3 residues downstream and upstream of the P-codon respectively.
+
+Frame inference is permitted only if:
+
+- The mRNA polymer run spanning the anchor and target codons is
+  **continuous** by `auth_seq_id` (no gaps).
+- The mRNA chain has at least **9 consecutive polymer residues**
+  somewhere in the chain (a conservative check that an E/P/A frame
+  can plausibly be spanned).
+
+Otherwise mark the unresolved sites' codons as incomplete and add the
+warning `insufficient_mrna_for_frame_inference`. Frame-inferred
+residues are tagged with `source: "mrna_frame_inference"`.
 
 #### 30.8.5 Assignment status
 
@@ -3576,6 +3600,10 @@ Coverage requirements:
     comp_id is served from the cache (no second HTTP request).
 22. CCD parse failure / network failure falls back to the
     first-character heuristic without raising.
+23. Frame inference anchors on the P-site codon and fills A and E
+    correctly when only the P-site has FR3D pairs (e.g. 5UYN
+    pre-accommodation state). The most-A-side complete site is used
+    as the anchor in A → P → E priority order.
 
 ### 30.16 References
 
