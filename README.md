@@ -115,65 +115,67 @@ in preference to relying on chain names or sequence-only heuristics.
 
 ## Workflow
 
-```text
-                       ┌──────────────────────────┐
-                       │  PDB ID (e.g. 5UYM)      │
-                       └────────────┬─────────────┘
-                                    ▼
-        ┌───────────────────────────────────────────────────┐
-        │  RCSB GraphQL  +  PDBe REST (Rfam fallback)       │
-        │  → assemblies, chains, Rfam, taxonomy, ligands    │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  Classify                                         │
-        │  rRNA core + ribosomal-protein superkingdom vote  │
-        │  → bacterial / eukaryotic / organellar / skip     │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  Pick reference                                   │
-        │  5J7L (bacterial/organellar) or 7ZW0 (eukaryotic) │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  BGSU correspondence                              │
-        │  reference anchors → query-PDB equivalent units   │
-        │  per-assembly chain-substitution fallback applied │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  Download assembly mmCIF + Gemmi neighbour search │
-        │  → chains contacting each anchor set              │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  Assign mRNA / A-tRNA / P-tRNA / E-tRNA            │
-        │  Infer tRNA states                                │
-        │  Label A-site factor by CCA-end neighbour         │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  RADdb LSU↔SSU motion metrics                     │
-        │  (auto-refreshed weekly; matched by chain triple) │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  FR3D mRNA↔tRNA codon/anticodon base pairs        │
-        │  per A/P/E site (cached per PDB)                  │
-        └────────────┬──────────────────────────────────────┘
-                     ▼
-        ┌───────────────────────────────────────────────────┐
-        │  JSON  +  ribosome_chain_annotation.csv           │
-        │        +  ribosome_assembly_annotation.csv        │
-        └───────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    classDef source fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef proc fill:#ffffff,stroke:#424242,color:#212121
+    classDef io fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20,stroke-width:2px
+    classDef decision fill:#fff3e0,stroke:#ef6c00,color:#e65100
+
+    Input(["PDB ID"]):::io
+
+    %% External data sources
+    RCSB[("RCSB<br/>GraphQL")]:::source
+    PDBe[("PDBe REST<br/>nucleic_mappings/rfam")]:::source
+    BGSU[("BGSU RNA 3D Hub<br/>correspondence")]:::source
+    Coords[("RCSB Files<br/>biological-assembly mmCIF")]:::source
+    RADdb[("RADdb LSU↔SSU CSV<br/>refreshed weekly")]:::source
+    FR3D[("FR3D base-pair CSV<br/>per PDB entry")]:::source
+    CCD[("PDB Chemical<br/>Component Dictionary")]:::source
+
+    %% Processing stages
+    Fetch["Fetch entry metadata;<br/>augment rRNA Rfam"]:::proc
+    Classify{"Classify assembly"}:::decision
+    Skip(["Skip<br/>(NMR, archaeal,<br/>partial, unsupported)"]):::io
+    SelectRef["Select reference ribosome<br/>5J7L · 7ZW0"]:::proc
+    Anchors["Project functional-site anchors<br/>onto query rRNA"]:::proc
+    Contacts["Gemmi neighbour search<br/>against projected anchors"]:::proc
+    Assign["Assign mRNA, A/P/E tRNA;<br/>infer states; label factor at CCA end"]:::proc
+    Movements["Look up inter-subunit +<br/>SSU-head rotation"]:::proc
+    Codon["Extract codon ↔ anticodon<br/>per A/P/E site<br/>(FR3D pairing fallback for missed sites)"]:::proc
+
+    %% Output
+    Output(["RibosomeAnnotation JSON<br/>+ ribosome_chain_annotation.csv<br/>+ ribosome_assembly_annotation.csv"]):::io
+
+    %% Flow
+    Input --> Fetch
+    RCSB --> Fetch
+    PDBe --> Fetch
+
+    Fetch -->|per biological assembly| Classify
+    Classify -->|unsupported| Skip
+    Classify -->|supported| SelectRef
+    SelectRef --> Anchors
+    BGSU --> Anchors
+    Anchors --> Contacts
+    Coords --> Contacts
+    Contacts --> Assign
+    Assign --> Movements
+    RADdb --> Movements
+    Movements --> Codon
+    FR3D --> Codon
+    CCD -.->|lazy: modified nts only| Codon
+    Codon --> Output
+    Skip --> Output
 ```
 
-A PDB entry may contain multiple biological assemblies (e.g. 4V5Q
-contains two). The pipeline executes the classify-through-assign
-block **once per assembly**, independently — each assembly represents
-one complete ribosome and receives its own functional-chain
-assignment and tRNA states.
+External data sources are shown in blue, in-package processing stages
+in white, and inputs/outputs in green. A PDB entry may contain
+multiple biological assemblies (e.g. 4V5Q contains two); the
+classify-through-codon block is executed once per assembly,
+independently, so that each assembly receives its own functional-chain
+assignment, tRNA states, motion metrics, and codon-anticodon
+evidence.
 
 ## Installation
 
