@@ -22,22 +22,33 @@ from ribosome_state_annotator.exceptions import (
     UnsupportedRibosomeError,
 )
 from ribosome_state_annotator.models import (
+    Anticodon,
+    AnticodonResidue,
     AssemblyContext,
+    BasePair,
     ChainRef,
+    Codon,
+    CodonResidue,
     CorrespondenceResult,
     LargeScaleMovements,
     LigandRef,
     RibosomeAnnotation,
     RibosomeClassification,
     RibosomeStatus,
+    TRNAmRNAInteraction,
 )
 
 __version__ = "0.1.0.dev0"
 
 __all__ = [
+    "Anticodon",
+    "AnticodonResidue",
     "ApiRequestError",
     "AssemblyContext",
+    "BasePair",
     "ChainRef",
+    "Codon",
+    "CodonResidue",
     "CompletenessThresholds",
     "CoordinateDownloadError",
     "CoordinateParsingError",
@@ -49,6 +60,7 @@ __all__ = [
     "RibosomeAnnotatorError",
     "RibosomeClassification",
     "RibosomeStatus",
+    "TRNAmRNAInteraction",
     "UnsupportedRibosomeError",
     "__version__",
     "annotate_assembly",

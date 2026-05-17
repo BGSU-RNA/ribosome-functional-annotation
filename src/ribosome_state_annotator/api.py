@@ -91,6 +91,7 @@ from ribosome_state_annotator.rcsb_client import (
     fetch_entry_payload,
     parse_assemblies,
 )
+from ribosome_state_annotator.trna_mrna import extract_trna_mrna_interactions
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ def annotate_pdb(
     raddb_dataset: RADdbDataset | None = None,
     refresh_raddb: bool = False,
     no_raddb: bool = False,
+    no_fr3d: bool = False,
 ) -> list[RibosomeAnnotation]:
     """Annotate every biological assembly in one PDB entry.
 
@@ -149,6 +151,9 @@ def annotate_pdb(
         no_raddb: Skip RADdb integration entirely. The output JSON still
             contains a ``large_scale_movements`` block with ``rad_date=None``
             and null metrics so consumers see a stable schema.
+        no_fr3d: Skip the tRNA-mRNA codon/anticodon extraction (no FR3D
+            call). The output JSON still contains
+            ``trna_mrna_interactions`` as an empty list.
 
     Returns:
         A list of :class:`RibosomeAnnotation` — one per processed assembly
@@ -232,6 +237,7 @@ def annotate_pdb(
                 local_coordinate_path=local_coordinate_path,
                 client=client,
                 raddb_dataset=resolved_raddb,
+                no_fr3d=no_fr3d,
             )
         )
     return results
@@ -264,6 +270,7 @@ def annotate_many(
     refresh_raddb: bool = False,
     raddb_dataset: RADdbDataset | None = None,
     no_raddb: bool = False,
+    no_fr3d: bool = False,
     client: httpx.Client | None = None,
     **kwargs: Any,
 ) -> list[RibosomeAnnotation]:
@@ -297,6 +304,7 @@ def annotate_many(
                     client=client,
                     raddb_dataset=resolved_raddb,
                     no_raddb=no_raddb,
+                    no_fr3d=no_fr3d,
                     **kwargs,
                 )
             )
@@ -331,6 +339,7 @@ def _annotate_one_assembly(
     local_coordinate_path: Path | None,
     client: httpx.Client | None,
     raddb_dataset: RADdbDataset | None = None,
+    no_fr3d: bool = False,
 ) -> RibosomeAnnotation:
     pdb_id = assembly.pdb_id
     aid = assembly.assembly_id
@@ -449,7 +458,7 @@ def _annotate_one_assembly(
     )
     warnings.extend(states.warnings)
 
-    return _build_annotated_annotation(
+    annotation = _build_annotated_annotation(
         assembly=assembly,
         by_role=by_role,
         classification_result=classification_result,
@@ -458,6 +467,25 @@ def _annotate_one_assembly(
         warnings=warnings,
         raddb_dataset=raddb_dataset,
     )
+
+    # tRNA-mRNA codon/anticodon evidence. Best-effort — every failure
+    # path returns an empty list, never raises, so the annotation
+    # pipeline cannot be broken by an FR3D outage.
+    if not no_fr3d:
+        try:
+            annotation.trna_mrna_interactions = extract_trna_mrna_interactions(
+                annotation, structure, cache=cache, client=client
+            )
+        except Exception as exc:  # defensive — module already swallows known errors
+            logger.warning(
+                "tRNA-mRNA extraction failed for %s assembly %s: %s",
+                pdb_id,
+                aid,
+                exc,
+            )
+            annotation.trna_mrna_interactions = []
+
+    return annotation
 
 
 # ---------------------------------------------------------------------------

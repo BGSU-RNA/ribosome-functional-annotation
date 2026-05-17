@@ -201,7 +201,9 @@ For each input PDB ID:
        (`intersubunit_rotation`, `ssu_head_rotation`) for the
        assembly's `(pdb_id, lsu_chain_id, ssu_chain_id)` triple —
        see §29.
-   14. Emit structured annotation output.
+   14. Extract per-site codon/anticodon evidence
+       (`trna_mrna_interactions`) from FR3D base pairs — see §30.
+   15. Emit structured annotation output.
 
 ## 5. Required external data sources
 
@@ -620,6 +622,16 @@ Used to attach two motion metrics
 (`intersubunit_rotation`, `ssu_head_rotation`) to each annotated
 assembly. See §29 for the full local-cache + refresh policy, the
 match-key rules, and the JSON output schema.
+
+### 5.6 FR3D base-pair CSV (codon-anticodon evidence)
+
+Curated per-PDB base-pair annotations from the FR3D pipeline,
+published at
+`http://rna.bgsu.edu/rna3dhub/pdb/<pdb_id>/interactions/fr3d/basepairs/csv`.
+Three columns: `unit_id_1, interaction_type, unit_id_2`. Used to
+populate per-site `trna_mrna_interactions` evidence (codon residues,
+anticodon residues, FR3D base-pair labels). See §30 for the full
+extraction pipeline.
 
 ## 6. Reference data
 
@@ -1222,6 +1234,9 @@ class RibosomeAnnotation(BaseModel):
     # for annotated assemblies — null when RADdb is unavailable or the
     # (pdb, lsu, ssu) triple doesn't match a RADdb row.
     large_scale_movements: LargeScaleMovements | None = None
+    # Per-site (A/P/E) codon/anticodon base-pair evidence from FR3D (§30).
+    # Always emitted (possibly empty) for stable consumer schema.
+    trna_mrna_interactions: list[TRNAmRNAInteraction] = []
     classification_evidence: dict = {}
     warnings: list[str] = []
 
@@ -2000,6 +2015,7 @@ Implement a cache layer for:
 - Downloaded coordinate (assembly mmCIF) files.
 - The RADdb LSU↔SSU CSV plus its metadata sidecar (§29 — separate
   refresh policy: 7-day weekly window, not content-addressed).
+- FR3D per-PDB base-pair CSVs (§30 — content-addressed).
 
 Default cache directory:
 
@@ -2023,6 +2039,7 @@ rcsb/<pdb_id_lower>.json
 bgsu/<sha256(query_url)>.json
 pdbe/<pdb_id_lower>.json
 coords/<pdb_id_lower>-assembly<n>.cif.gz
+fr3d/<pdb_id_lower>.csv
 raddb/RADdb.LSUSSU.csv
 raddb/RADdb.LSUSSU.metadata.json
 ```
@@ -2199,7 +2216,8 @@ ribosome-state-annotator/
 │       ├── infer.py
 │       ├── output.py
 │       ├── cache.py
-│       └── raddb.py
+│       ├── raddb.py
+│       └── trna_mrna.py
 ├── tests/
 │   ├── test_unit_id_parser.py
 │   ├── test_classification.py
@@ -3065,3 +3083,470 @@ See `REFERENCES.md` for the RADtool / RADdb methodology citation
 naming follows the established ribosome-conformation literature:
 `body rot.` is the canonical inter-subunit ratchet rotation;
 `head rot.` is the SSU-head swivel.
+
+## 30. tRNA-mRNA codon/anticodon extraction (FR3D)
+
+This section is the authoritative spec for the per-site codon ↔
+anticodon evidence extraction. The feature surfaces, for every
+A/P/E-site tRNA assigned by the upstream pipeline, the three anticodon
+residues, the three codon residues, and the FR3D base-pair
+interactions that connect them — as raw evidence only.
+
+### 30.1 Goal
+
+Add a `trna_mrna_interactions` field on `RibosomeAnnotation` (one
+entry per A/P/E site present) that captures:
+
+- The three anticodon residues at biological positions 34, 35, 36.
+- The three codon residues at codon positions 1, 2, 3.
+- Each FR3D base-pair interaction (`cWW`, `tHS`, etc.) observed
+  between a codon residue and an anticodon residue.
+- Per-residue modification metadata (the observed CCD code,
+  parent base, and `is_modified` flag).
+- Per-codon assignment status (`complete` / `partial` / `missing`)
+  and per-pair assignment status (`assigned` / `ambiguous`).
+
+This is **evidence-only**. The module MUST NOT:
+
+- classify cognate / near-cognate / non-cognate.
+- infer tRNA type or amino acid identity.
+- infer canonical Watson-Crick status from `cWW`.
+
+Consumers receive raw FR3D labels and decide.
+
+### 30.2 Run condition
+
+Run only when the annotation already has:
+
+- a non-null `mrna_chain`, AND
+- at least one of `aminoacyl_trna_chain`, `peptidyl_trna_chain`,
+  `exit_trna_chain` populated.
+
+When the condition fails, the field is emitted as an empty list
+(stable consumer schema).
+
+Each site (A, P, E) is processed independently. Missing sites are
+skipped silently.
+
+### 30.3 Source
+
+```text
+http://rna.bgsu.edu/rna3dhub/pdb/<pdb_id_lower>/interactions/fr3d/basepairs/csv
+```
+
+Three-column CSV: `unit_id_1, interaction_type, unit_id_2`. Each
+physical base pair appears twice (once per direction); the
+implementation must deduplicate.
+
+The endpoint is per-PDB and content-stable, so the raw CSV bytes are
+cached under the existing user-cache root:
+
+```text
+~/.cache/ribosome-state-annotator/fr3d/<pdb_id_lower>.csv
+```
+
+Cache invalidation follows the same content-addressed never-expires
+policy as the other §17 namespaces.
+
+### 30.4 Anticodon residue identification
+
+The three anticodon residues are the polymer residues at
+`auth_seq_id` **34, 35, 36** of the tRNA chain. The pick is anchored
+on the canonical first residue (auth_seq_id 1) rather than on the
+34th element of the polymer list. This matters when a deposited
+chain has a pre-residue numbered `0` (or negative) at the 5′ end —
+for example 5UYM chain W, whose polymer runs 0..75: the "34th
+polymer residue" would land on auth_seq_id 33 and silently miss the
+true Sprinzl-34 wobble residue.
+
+Procedure:
+
+1. Filter the Gemmi chain to `EntityType.Polymer` (skips Mg / HOH /
+   modified-nucleotide-as-ligand HETATMs that share the chain ID).
+2. From that polymer set, take the residues whose `seqid.num` is
+   exactly 34, 35, and 36.
+3. If any of those is missing (chain truncated, organellar
+   mt-tRNA with renumbering, anticodon-stem-loop fragment), skip the
+   site entirely and add a warning to the assembly.
+
+Record the source as `anticodon_position_source: "polymer_sequence_index"`
+(or `"auth_seq_id_fallback"` for a future Sprinzl-aware version that
+falls back when its lookup fails). v1 always uses the auth_seq_id
+34/35/36 anchor described above.
+
+### 30.5 Unit-ID construction
+
+For both anticodon residues and codon residues, construct
+BGSU-style unit IDs as:
+
+```text
+<pdb_id_upper>|1|<chain>|<observed_chem_comp_id>|<auth_seq_id>
+```
+
+Critical: the unit ID's residue number is the residue's **author
+sequence number** (`seqid.num`), NOT the polymer-sequence-index. FR3D
+unit IDs embed deposited residue numbers; the biological position
+(34/35/36) lives separately in the `trna_position` field. The
+chem_comp_id is the *observed* CCD code, so modified residues keep
+their modified name (`PSU`, `5MU`, `MIA`, etc.) — required for matching
+FR3D rows verbatim.
+
+### 30.6 Residue chemistry metadata
+
+For each anticodon residue, record:
+
+- `parent_base`: the canonical base (`"A" / "C" / "G" / "U"`). Use
+  Gemmi's tabulated chemical-component dictionary
+  (`gemmi.find_tabulated_residue(comp).one_letter_code`) — modified
+  nucleotides surface as a lowercase letter that gets uppercased here.
+- `trna_chem_comp_id`: the observed CCD code, verbatim.
+- `is_modified`: True iff `trna_chem_comp_id` is a known modified
+  nucleotide (i.e. Gemmi returned a lowercase one-letter code).
+
+For each codon residue:
+
+- `base`: the residue name (canonical bases are typically what mRNA
+  carries; modified bases are rare on coding mRNA).
+- `source`: `"fr3d_observed"`, `"mmcif_reconstructed"`, or
+  `"mrna_frame_inference"` per §30.8.
+
+### 30.7 FR3D codon-pairing fallback for missed sites
+
+Contact-transfer (`infer.assign_functional_chains`, §11) compares
+candidate tRNA chains against the canonical SSU decoding-centre
+monitor bases (E. coli A1492/A1493 → yeast 18S A1824/A1825). Those
+monitor bases only flip out and contact the codon-anticodon duplex
+once the aa-tRNA has been **accommodated** — in pre-accommodation
+states (eEF1A·GTP·aa-tRNA decoding intermediates, e.g. PDB **3JAG**),
+the anticodon is base-paired to the mRNA codon but the rRNA
+fingerprint hasn't formed yet. Contact-transfer correctly refuses to
+claim the chain, but the result is an unassigned A-site even though
+codon-anticodon pairing is unambiguous in FR3D.
+
+The fallback closes this gap. Before per-site extraction, scan every
+unassigned tRNA-Rfam chain (those in `other_rna_chains` with Rfam
+RF00005) for cWW FR3D pairs to the mRNA chain at the anticodon
+residues (auth_seq_id 34/35/36 per §30.4). Disambiguate which empty
+site each candidate fills using the **mRNA codon position**:
+
+- The mRNA is translated 5' → 3': A-codon is the most-3'
+  (largest auth_seq_id), P is one codon (3 residues) upstream, E is
+  two codons upstream.
+- Score each candidate by the **mean `auth_seq_id`** of the mRNA
+  residues it pairs with.
+- Sort candidates descending by that score.
+- Assign in that order to the remaining empty slots in canonical
+  A → P → E order — so the most-downstream candidate goes to the
+  most-A-side empty slot, the next-downstream to the next-A-side, etc.
+
+Each fallback assignment:
+
+- Mutates `annotation.aminoacyl_trna_chain` /
+  `peptidyl_trna_chain` / `exit_trna_chain` in place.
+- Removes the chain from `other_rna_chains`.
+- Appends a warning of the form
+  `<site>trna_assigned_from_fr3d_codon_pairing_<chain_id>`.
+- Records the assignment under
+  `classification_evidence["fr3d_codon_pairing_fallback"][site]` so
+  consumers can distinguish FR3D-derived assignments from canonical
+  contact-transfer assignments.
+
+The fallback runs only when:
+
+- An mRNA chain is present.
+- At least one of A / P / E is empty.
+- An unassigned tRNA-Rfam chain (`RF00005` in `rfam_accessions`)
+  exists in `other_rna_chains`.
+- That candidate makes ≥ 1 cWW pair with the mRNA at one of the
+  anticodon residues (non-cWW pairs alone don't trigger assignment).
+
+The fallback never overrides an existing assignment. It does NOT
+recompute tRNA states for the newly-assigned chain in v1 — the state
+inference is left to the existing §12 contact-transfer rules, which
+will typically report `*/...` (no canonical SSU contact) for
+fallback-assigned chains. A future version may add state inference
+informed by the FR3D codon-pairing evidence.
+
+### 30.8 FR3D pair filtering
+
+Keep only FR3D rows where:
+
+- One side's chain == the mRNA chain ID.
+- The other side's chain == the current tRNA chain ID.
+- The tRNA side's `auth_seq_id` is one of the three anticodon
+  residues' `auth_seq_id`s (computed in §30.4).
+
+Each physical pair appears twice in FR3D (`A → B` and `B → A`).
+Canonicalise as `(mrna_unit_id, interaction, trna_unit_id)` and
+deduplicate.
+
+### 30.9 Codon assignment
+
+#### 30.8.1 Anticodon ↔ codon position mapping
+
+Antiparallel base pairing maps tRNA positions to codon positions:
+
+| tRNA position | codon position | Notes |
+|---------------|----------------|-------|
+| 34            | 3              | wobble position — `is_wobble_position = true` on this pair |
+| 35            | 2              | |
+| 36            | 1              | |
+
+#### 30.8.2 Primary source: FR3D-observed pairs
+
+For each codon position, the mRNA residue comes from the FR3D pair
+with the matching anticodon residue.
+
+If multiple mRNA residues pair with the same anticodon position:
+
+1. Prefer the `cWW` pair (canonical Watson-Crick geometry).
+2. If still ambiguous (no `cWW`, or multiple `cWW`), surface one
+   candidate and mark `assignment_status = "ambiguous"` on the
+   resulting `BasePair` entry.
+
+#### 30.8.3 Secondary source: mmCIF polymer-order reconstruction
+
+If at least one codon position is FR3D-observed but the others
+aren't, fill the missing positions from the immediately-adjacent
+residues in mmCIF polymer order. The triplet is contiguous on the
+mRNA polymer.
+
+Examples (highest seeded codon position drives the others):
+
+- Position 3 observed → positions 1, 2 = the two residues immediately
+  preceding position 3 in polymer order.
+- Position 2 observed → position 1 = immediately preceding, position
+  3 = immediately following.
+- Position 1 observed → positions 2, 3 = the two residues immediately
+  following position 1.
+
+Mark reconstructed residues as `source: "mmcif_reconstructed"`.
+
+#### 30.8.4 Tertiary source: mRNA frame inference
+
+If the A-site codon is fully resolved (either FR3D-observed or
+FR3D+reconstruct), the P and E codons can be inferred by stepping the
+mRNA polymer-order frame upstream by 1 codon (P) and 2 codons (E):
+
+- P-site codon position 1 = A-site codon position 1 − 3 polymer indices.
+- E-site codon position 1 = A-site codon position 1 − 6 polymer indices.
+
+This is permitted only if the relevant mRNA polymer run is
+**continuous** by `auth_seq_id` (no gaps). The implementation must
+also check that the mRNA chain has at least **9 consecutive polymer
+residues** before attempting frame inference at all — otherwise mark
+the P / E codons as incomplete and add the warning
+`insufficient_mrna_for_frame_inference`.
+
+Mark frame-inferred residues as `source: "mrna_frame_inference"`.
+
+#### 30.8.5 Assignment status
+
+Per-codon `assignment_status`:
+
+- `"complete"` — all three positions assigned (by any combination of
+  sources). The `sequence` field is populated as the 3-letter parent-
+  base string.
+- `"partial"` — one or two positions assigned. `sequence` is `null`.
+- `"missing"` — no positions assigned. `sequence` is `null`.
+
+Per-pair `assignment_status`:
+
+- `"assigned"` — single unique pair for this codon position.
+- `"ambiguous"` — multiple FR3D pairs at this position and no `cWW`
+  disambiguator.
+
+### 30.10 JSON output schema
+
+Add `trna_mrna_interactions` (an ordered list, A → P → E) to each
+annotated assembly:
+
+```jsonc
+"trna_mrna_interactions": [
+  {
+    "site": "A",
+    "mrna_chain_id": "V",
+    "trna_chain_id": "Y",
+    "anticodon_position_source": "polymer_sequence_index",
+
+    "codon": {
+      "sequence": "UUC",
+      "assignment_status": "complete",
+      "residues": [
+        { "codon_position": 1, "unit_id": "5UYM|1|V|U|19", "base": "U",
+          "source": "mrna_frame_inference" },
+        { "codon_position": 2, "unit_id": "5UYM|1|V|U|20", "base": "U",
+          "source": "mrna_frame_inference" },
+        { "codon_position": 3, "unit_id": "5UYM|1|V|C|21", "base": "C",
+          "source": "fr3d_observed" }
+      ]
+    },
+
+    "anticodon": {
+      "sequence_parent": "GAA",
+      "residues": [
+        { "trna_position": 34, "unit_id": "5UYM|1|Y|G|34", "parent_base": "G",
+          "trna_chem_comp_id": "G", "is_modified": false },
+        { "trna_position": 35, "unit_id": "5UYM|1|Y|A|35", "parent_base": "A",
+          "trna_chem_comp_id": "A", "is_modified": false },
+        { "trna_position": 36, "unit_id": "5UYM|1|Y|A|36", "parent_base": "A",
+          "trna_chem_comp_id": "A", "is_modified": false }
+      ]
+    },
+
+    "pairs": [
+      {
+        "codon_position": 3, "trna_position": 34,
+        "codon_unit_id": "5UYM|1|V|C|21", "trna_unit_id": "5UYM|1|Y|G|34",
+        "codon_base": "C", "trna_parent_base": "G",
+        "trna_chem_comp_id": "G", "trna_is_modified": false,
+        "fr3d_interaction": "cWW", "basepair": "C-G",
+        "is_wobble_position": true, "assignment_status": "assigned"
+      }
+    ],
+
+    "warnings": []
+  }
+]
+```
+
+When the run condition fails, `trna_mrna_interactions: []`. The block
+is JSON-only — it is **not** mirrored into the chain-level or
+assembly-level CSV outputs in v1.
+
+### 30.11 API surface
+
+#### 30.10.1 Library
+
+```python
+annotate_pdb(
+    pdb_id: str,
+    *,
+    # ... existing params ...
+    no_fr3d: bool = False,
+) -> list[RibosomeAnnotation]
+```
+
+`no_fr3d` skips the extraction entirely; the field is still emitted
+as an empty list. `annotate_many` accepts the same parameter.
+
+There is no `refresh_fr3d` flag in v1 — the cache is content-
+addressed and never expires (same policy as `rcsb/`, `bgsu/`, etc.).
+Users wanting fresh data delete the cache or pass `--no-cache`.
+
+#### 30.10.2 CLI
+
+No new flags are required. `ribostate cache info` gains an `fr3d`
+row showing the cache entry count.
+
+### 30.12 Module layout
+
+The integration lives in one new module:
+
+```text
+src/ribosome_state_annotator/trna_mrna.py
+```
+
+Recommended public surface:
+
+```python
+fetch_fr3d_basepairs(pdb_id, *, cache=None, client=None)
+    -> list[_ParsedFr3dRow] | None
+
+extract_trna_mrna_interactions(annotation, structure, *, cache=None, client=None)
+    -> list[TRNAmRNAInteraction]
+```
+
+The corresponding Pydantic models live in `models.py`:
+
+```python
+class AnticodonResidue(BaseModel): ...
+class Anticodon(BaseModel):  ...
+class CodonResidue(BaseModel):  ...
+class Codon(BaseModel):  ...
+class BasePair(BaseModel):  ...
+class TRNAmRNAInteraction(BaseModel):  ...
+```
+
+and `RibosomeAnnotation` gains:
+
+```python
+trna_mrna_interactions: list[TRNAmRNAInteraction] = []
+```
+
+### 30.13 Logging
+
+Required `INFO`-level events:
+
+- detected mRNA chain
+- detected A/P/E-site tRNA chains
+- current site being processed
+- anticodon residues identified
+- FR3D fetch URL (with cache hit/miss)
+- retained mRNA-anticodon basepair count per site
+- codon reconstruction / inference status per site
+
+Required `WARNING`-level events:
+
+- tRNA chain has fewer than 36 polymer residues
+- FR3D download / parse failure
+- ambiguous codon assignment (per codon position)
+- insufficient mRNA residues for frame inference
+- no FR3D pairs found for a site that has a tRNA chain
+- FR3D codon-pairing fallback assigned a previously empty site
+  (recorded both in `warnings` and in `classification_evidence`)
+
+### 30.14 Implementation requirements
+
+- Use the package's existing `httpx` client for the FR3D fetch.
+- Use stdlib `csv` for parsing.
+- Every failure path must degrade to an empty list / partial result
+  rather than raising — the codon/anticodon extraction must never
+  block the surrounding annotation pipeline.
+
+### 30.15 Tests
+
+Coverage requirements:
+
+1. Polymer-sequence-index 34/35/36 picker filters HETATM ions.
+2. Picker uses polymer index, not `auth_seq_id`, when the tRNA is
+   renumbered (chains starting at residue 101 still give a hit at
+   biological position 34).
+3. Picker returns `None` for chains with fewer than 36 polymer
+   residues.
+4. Unit ID embeds `auth_seq_id` and observed chem_comp (`PSU`, not
+   parent `U`).
+5. Parent-base / `is_modified` lookup correctly handles canonical
+   (`A` → `("A", False)`) and modified (`PSU` → `("U", True)`)
+   residues.
+6. FR3D CSV parser tolerates malformed rows.
+7. FR3D fetch caches on success and reuses the cache on the second
+   call (one HTTP call).
+8. Cross-chain pair filter keeps both orientations and deduplicates.
+9. Codon assignment maps tRNA positions to codon positions correctly
+   and prefers `cWW` when multiple pairs exist for the same anticodon
+   position.
+10. Local reconstruction fills missing codon positions from polymer
+    order in both directions.
+11. Frame inference fills P/E codons from a complete A-site codon.
+12. Frame inference returns `None` when the mRNA polymer run is too
+    short or has gaps.
+13. End-to-end extraction returns `[]` when there is no mRNA chain,
+    no tRNA chain, or FR3D is unreachable.
+14. End-to-end extraction populates all three sites correctly when
+    given a synthetic FR3D CSV.
+15. Per-site warning is added when frame inference is impossible.
+16. Fallback assigns A-site from FR3D evidence when contact-transfer
+    left A empty but a tRNA-Rfam chain has cWW codon-anticodon pairs.
+17. Fallback distinguishes A vs P vs E using the mRNA codon position
+    (descending `auth_seq_id` → A first).
+18. Fallback only triggers when ≥ 1 cWW pair exists (non-cWW pairs
+    alone do not trigger assignment).
+19. Fallback ignores short tRNA chains (< 36 polymer residues) and
+    non-tRNA-Rfam chains.
+
+### 30.16 References
+
+See `REFERENCES.md` for the FR3D citation (Sarver et al. 2008) and
+the Leontis-Westhof base-pair geometric nomenclature (2001).
+

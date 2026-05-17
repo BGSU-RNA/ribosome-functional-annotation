@@ -104,6 +104,97 @@ class AssemblyContext(BaseModel):
     coordinate_path: Path | None = None
 
 
+class AnticodonResidue(BaseModel):
+    """One residue at tRNA biological positions 34, 35, or 36.
+
+    ``trna_chem_comp_id`` is the **observed** CCD code (e.g. ``"PSU"``
+    for pseudouridine); ``parent_base`` is the unmodified canonical
+    base (``"U"``) used for codon-pairing inspection.
+    """
+
+    trna_position: int  # 34, 35, or 36
+    unit_id: str
+    parent_base: str
+    trna_chem_comp_id: str
+    is_modified: bool
+
+
+class Anticodon(BaseModel):
+    """Anticodon block on a tRNA at a single ribosomal site."""
+
+    sequence_parent: str | None = None
+    residues: list[AnticodonResidue] = Field(default_factory=list)
+
+
+class CodonResidue(BaseModel):
+    """One mRNA residue at codon position 1, 2, or 3.
+
+    ``source`` records how the residue was assigned:
+
+    - ``"fr3d_observed"`` — directly observed in an FR3D base-pair with
+      an anticodon residue.
+    - ``"mmcif_reconstructed"`` — the immediately-adjacent residue in
+      polymer order (filled when only some of the three codon positions
+      were FR3D-observed for this site).
+    - ``"mrna_frame_inference"`` — derived from the A-site codon by
+      stepping the mRNA polymer-order frame upstream by 1 (P-site) or 2
+      (E-site) codons.
+    """
+
+    codon_position: int  # 1, 2, or 3
+    unit_id: str
+    base: str
+    source: Literal["fr3d_observed", "mmcif_reconstructed", "mrna_frame_inference"]
+
+
+class Codon(BaseModel):
+    """mRNA codon at a single ribosomal site (A, P, or E)."""
+
+    sequence: str | None = None  # 3-character string when assignment_status == "complete"
+    assignment_status: Literal["complete", "partial", "missing"]
+    residues: list[CodonResidue] = Field(default_factory=list)
+
+
+class BasePair(BaseModel):
+    """One FR3D-observed mRNA-codon ↔ tRNA-anticodon base pair.
+
+    No biological classification is recorded — ``fr3d_interaction`` is
+    the raw FR3D label (``cWW``, ``tHS``, etc.) and downstream
+    consumers decide how to interpret it.
+    """
+
+    codon_position: int
+    trna_position: int
+    codon_unit_id: str
+    trna_unit_id: str
+    codon_base: str
+    trna_parent_base: str
+    trna_chem_comp_id: str
+    trna_is_modified: bool
+    fr3d_interaction: str
+    basepair: str  # e.g. "C-G", computed from codon_base + "-" + trna_parent_base
+    is_wobble_position: bool  # True iff trna_position == 34
+    assignment_status: Literal["assigned", "ambiguous"]
+
+
+class TRNAmRNAInteraction(BaseModel):
+    """All extracted codon/anticodon evidence for one tRNA site (A/P/E).
+
+    This block is evidence-only: it does not classify cognate /
+    near-cognate / non-cognate, and it does not infer Watson-Crick
+    status. Consumers interpret the raw FR3D interactions themselves.
+    """
+
+    site: Literal["A", "P", "E"]
+    mrna_chain_id: str
+    trna_chain_id: str
+    anticodon_position_source: Literal["polymer_sequence_index", "auth_seq_id_fallback"]
+    codon: Codon
+    anticodon: Anticodon
+    pairs: list[BasePair] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class LargeScaleMovements(BaseModel):
     """RADdb-derived large-scale ribosome motion metrics for one assembly.
 
@@ -181,6 +272,10 @@ class RibosomeAnnotation(BaseModel):
     # Always emitted (with null metrics) for annotated assemblies so the
     # output schema stays stable whether RADdb is reachable or not.
     large_scale_movements: LargeScaleMovements | None = None
+    # Per-site (A/P/E) codon/anticodon base-pair evidence extracted from
+    # FR3D. Always emitted (possibly empty) so the consumer schema is
+    # stable whether the run condition was met or not.
+    trna_mrna_interactions: list[TRNAmRNAInteraction] = Field(default_factory=list)
     classification_evidence: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 

@@ -38,6 +38,7 @@ _RCSB_DIR = "rcsb"
 _BGSU_DIR = "bgsu"
 _COORDS_DIR = "coords"
 _PDBE_DIR = "pdbe"
+_FR3D_DIR = "fr3d"
 
 
 class CacheInfo(BaseModel):
@@ -48,12 +49,19 @@ class CacheInfo(BaseModel):
     bgsu_entries: int = 0
     coords_entries: int = 0
     pdbe_entries: int = 0
+    fr3d_entries: int = 0
     total_bytes: int = 0
     exists: bool = False
 
     @property
     def total_entries(self) -> int:
-        return self.rcsb_entries + self.bgsu_entries + self.coords_entries + self.pdbe_entries
+        return (
+            self.rcsb_entries
+            + self.bgsu_entries
+            + self.coords_entries
+            + self.pdbe_entries
+            + self.fr3d_entries
+        )
 
 
 class Cache:
@@ -123,6 +131,28 @@ class Cache:
         _atomic_write_json(path, payload)
         return path
 
+    # ------------------------------------------------------------------ FR3D
+
+    def fr3d_path(self, pdb_id: str) -> Path:
+        """Per-PDB FR3D base-pair CSV path."""
+        return self.root / _FR3D_DIR / f"{pdb_id.lower()}.csv"
+
+    def get_fr3d_csv(self, pdb_id: str) -> bytes | None:
+        """Return the cached FR3D CSV bytes, or ``None`` if absent."""
+        path = self.fr3d_path(pdb_id)
+        if not path.is_file():
+            return None
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            logger.warning("fr3d cache read failed for %s (%s); treating as miss", path, exc)
+            return None
+
+    def put_fr3d_csv(self, pdb_id: str, data: bytes) -> Path:
+        path = self.fr3d_path(pdb_id)
+        _atomic_write_bytes(path, data)
+        return path
+
     # ---------------------------------------------------------- Maintenance
 
     def info(self) -> CacheInfo:
@@ -136,6 +166,7 @@ class Cache:
             bgsu_entries=_count_files(self.root / _BGSU_DIR),
             coords_entries=_count_files(self.root / _COORDS_DIR),
             pdbe_entries=_count_files(self.root / _PDBE_DIR),
+            fr3d_entries=_count_files(self.root / _FR3D_DIR),
             total_bytes=_dir_size(self.root),
         )
 

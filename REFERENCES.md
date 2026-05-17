@@ -151,6 +151,28 @@ biological examples:
   ssu_chain_id)` triple, which is unique per ribosome assembly in
   RADdb. See `raddb.py` for the local-cache / weekly-refresh policy.
 
+## tRNA-mRNA codon/anticodon base pairing (FR3D)
+
+- **Sarver, M., Zirbel, C. L., Stombaugh, J., Mokdad, A., & Leontis,
+  N. B. (2008). FR3D: Finding local and composite recurrent structural
+  motifs in RNA 3D structures.** *Journal of Mathematical Biology*,
+  56, 215–252. DOI:
+  [10.1007/s00285-007-0110-x](https://doi.org/10.1007/s00285-007-0110-x).
+  Introduces the FR3D (Find RNA 3D) annotation pipeline and the
+  Leontis–Westhof base-pair geometric classification scheme
+  (cWW / tWW / cWH / cHS / …) the package consumes verbatim from
+  the
+  [`rna.bgsu.edu/rna3dhub/pdb/<pdb>/interactions/fr3d/basepairs/csv`](https://rna.bgsu.edu/rna3dhub/)
+  endpoint. The package records the FR3D label as-is and does *not*
+  classify cognate / near-cognate / non-cognate; consumers interpret
+  the raw pairs.
+- **Leontis, N. B. & Westhof, E. (2001). Geometric nomenclature and
+  classification of RNA base pairs.** *RNA*, 7, 499–512. DOI:
+  [10.1017/S1355838201002515](https://doi.org/10.1017/S1355838201002515).
+  Defines the 12-class geometric base-pair nomenclature
+  (cis/trans × Watson-Crick/Hoogsteen/Sugar-edge for each side) used by
+  FR3D and surfaced as `fr3d_interaction` in each base-pair entry.
+
 ## External APIs
 
 - **RCSB Data API (GraphQL).** <https://data.rcsb.org/index.html#data-api>.
@@ -165,6 +187,10 @@ biological examples:
   curated functional-site anchor nucleotides from a reference
   ribosome onto the equivalent positions in any query ribosome via
   Rfam covariance-model alignment.
+- **BGSU RNA 3D Hub FR3D basepair CSV —
+  `/rna3dhub/pdb/<pdb_id>/interactions/fr3d/basepairs/csv`.**
+  Used to extract codon/anticodon base-pair evidence per A/P/E site.
+  See the FR3D citation above for the methodology.
 - **RADdb LSU↔SSU CSV.**
   <https://radtool.rc.northeastern.edu/public_database/>. Weekly
   release of inter-subunit + SSU-head rotation/tilt/translation

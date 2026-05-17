@@ -157,6 +157,11 @@ conserved positions.
         └────────────┬──────────────────────────────────────┘
                      ▼
         ┌───────────────────────────────────────────────────┐
+        │  FR3D mRNA↔tRNA codon/anticodon base pairs        │
+        │  per A/P/E site (cached per PDB)                  │
+        └────────────┬──────────────────────────────────────┘
+                     ▼
+        ┌───────────────────────────────────────────────────┐
         │  JSON  +  ribosome_chain_annotation.csv           │
         │        +  ribosome_assembly_annotation.csv        │
         └───────────────────────────────────────────────────┘
@@ -334,10 +339,10 @@ v1 out-of-scope:
 
 Every external call is cached on disk at
 `~/.cache/ribosome-state-annotator/` (override with `--cache-dir`,
-disable with `--no-cache`). Five namespaces: `rcsb/`, `bgsu/`, `pdbe/`,
-`coords/`, and `raddb/`. The first four are content-addressed and
-never expire — to refresh, use `ribostate cache clear` or delete the
-cache root.
+disable with `--no-cache`). Six namespaces: `rcsb/`, `bgsu/`, `pdbe/`,
+`coords/`, `fr3d/`, and `raddb/`. The first five are content-addressed
+and never expire — to refresh, use `ribostate cache clear` or delete
+the cache root.
 
 ### RADdb large-scale movements
 
@@ -370,6 +375,59 @@ Only `body rot.` and `head rot.` are surfaced in v1. The remaining
 RADdb columns (tilt, translation, directionality) are loaded into
 memory but not yet exposed.
 
+### tRNA-mRNA codon/anticodon evidence (FR3D)
+
+For each annotated assembly that has an mRNA chain and at least one
+A/P/E-site tRNA, the package fetches the
+[FR3D](https://rna.bgsu.edu/main/data-and-services/) curated base
+pairs for the PDB and extracts a
+`trna_mrna_interactions` list — one entry per A/P/E site.
+
+Each entry reports the three anticodon residues (the polymer residues
+at **auth_seq_id 34/35/36** — anchored on the canonical first residue
+so chains with extra 5'-end residues like 5UYM `W` (polymer starts
+at residue 0) still resolve the true Sprinzl-34 wobble position),
+the codon residues (FR3D-observed → mmCIF-reconstructed →
+mRNA-frame-inferred fallback chain), the raw FR3D base-pair
+interactions (`cWW`, `tHS`, etc. — *no* cognate / near-cognate
+classification, *no* Watson-Crick interpretation), and warnings when
+something couldn't be resolved.
+
+Example A-site entry from 5UYM:
+
+```json
+{
+  "site": "A",
+  "mrna_chain_id": "V",
+  "trna_chain_id": "Y",
+  "anticodon_position_source": "polymer_sequence_index",
+  "codon": { "sequence": "UUC", "assignment_status": "complete", "residues": [...] },
+  "anticodon": { "sequence_parent": "GAA", "residues": [...] },
+  "pairs": [
+    { "codon_position": 3, "trna_position": 34, "fr3d_interaction": "cWW",
+      "basepair": "C-G", "is_wobble_position": true, ... }
+  ],
+  "warnings": []
+}
+```
+
+The FR3D CSV is cached per-PDB under the `fr3d/` namespace.
+
+**FR3D codon-pairing fallback.** Contact-transfer compares candidate
+tRNAs against the SSU decoding-centre monitor bases. In
+pre-accommodation states (e.g. 3JAG — eEF1A·aa-tRNA decoding
+intermediate) those monitor bases haven't flipped out yet, so the
+canonical SSU fingerprint isn't there and the A-tRNA is left
+unassigned. When that happens, the package automatically scans
+unassigned tRNA-Rfam chains for cWW codon-anticodon pairs in FR3D
+and fills the empty A/P/E slot — using the mRNA codon position
+(more-3' → A, more-5' → P / E) to disambiguate when multiple
+candidates are present. Fallback assignments surface a warning of
+the form `atrna_assigned_from_fr3d_codon_pairing_<chain>` and an
+entry under `classification_evidence["fr3d_codon_pairing_fallback"]`
+so consumers can distinguish them from canonical contact-transfer
+assignments.
+
 ## Package layout
 
 The source tree is split by responsibility — each module owns one stage
@@ -389,8 +447,9 @@ of the contact-transfer workflow above.
 | `gemmi_contacts.py` | Gemmi `NeighborSearch` wrapper restricted to the active assembly. |
 | `classify.py` | rRNA-core determination, ribosomal-protein detection, dominant-superkingdom vote, final classification rule. |
 | `infer.py` | Functional chain assignment + tRNA-state inference. Owns the polymer-filtered CCA-end selector for the A-site factor label. |
-| `cache.py` | Content-addressed on-disk cache with four namespaces: `rcsb/`, `bgsu/`, `pdbe/`, `coords/`. |
+| `cache.py` | Content-addressed on-disk cache with five namespaces: `rcsb/`, `bgsu/`, `pdbe/`, `coords/`, `fr3d/`. |
 | `raddb.py` | RADdb integration — download / refresh / parse the LSU↔SSU CSV, lookup motion metrics per `(pdb, lsu, ssu)` triple. |
+| `trna_mrna.py` | FR3D-driven codon/anticodon extraction per A/P/E site (anticodon at polymer-sequence-index 34/35/36; codon = FR3D-observed → mmCIF-reconstructed → mRNA-frame-inferred). |
 | `config.py` | Tunables: contact cutoff, completeness thresholds, network timeouts. |
 | `exceptions.py` | Typed exception hierarchy (`ApiRequestError`, `CorrespondenceMappingError`, `CoordinateDownloadError`, …). |
 | `output.py` | JSON / JSONL / CSV writers. |
