@@ -198,3 +198,9 @@ biological examples:
   above for the underlying methodology.
 - **Rfam.** <https://rfam.org/>. Source of the rRNA / tRNA family
   accessions consulted by `RFAM_ROLE_MAP` in `constants.py`.
+- **PDB Chemical Component Dictionary (per-component CIF).**
+  <https://files.rcsb.org/ligands/view/>. Authoritative
+  `_chem_comp.mon_nstd_parent_comp_id` and `_chem_comp.one_letter_code`
+  for modified nucleotides; consulted by `ccd_client.py` when Gemmi's
+  built-in tabulated table returns a blank or missing entry. Cached
+  per-component under the `ccd/` namespace.

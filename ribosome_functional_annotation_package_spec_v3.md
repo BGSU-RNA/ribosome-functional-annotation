@@ -2016,6 +2016,9 @@ Implement a cache layer for:
 - The RADdb LSU↔SSU CSV plus its metadata sidecar (§29 — separate
   refresh policy: 7-day weekly window, not content-addressed).
 - FR3D per-PDB base-pair CSVs (§30 — content-addressed).
+- Per-component PDB Chemical Component Dictionary CIFs (§30 — used to
+  resolve authoritative parent-base info for modified nucleotides that
+  Gemmi's built-in tabulated table doesn't fully describe).
 
 Default cache directory:
 
@@ -2040,6 +2043,7 @@ bgsu/<sha256(query_url)>.json
 pdbe/<pdb_id_lower>.json
 coords/<pdb_id_lower>-assembly<n>.cif.gz
 fr3d/<pdb_id_lower>.csv
+ccd/<comp_id_upper>.cif
 raddb/RADdb.LSUSSU.csv
 raddb/RADdb.LSUSSU.metadata.json
 ```
@@ -2217,7 +2221,8 @@ ribosome-state-annotator/
 │       ├── output.py
 │       ├── cache.py
 │       ├── raddb.py
-│       └── trna_mrna.py
+│       ├── trna_mrna.py
+│       └── ccd_client.py
 ├── tests/
 │   ├── test_unit_id_parser.py
 │   ├── test_classification.py
@@ -3195,20 +3200,39 @@ FR3D rows verbatim.
 
 For each anticodon residue, record:
 
-- `parent_base`: the canonical base (`"A" / "C" / "G" / "U"`). Use
-  Gemmi's tabulated chemical-component dictionary
-  (`gemmi.find_tabulated_residue(comp).one_letter_code`) — modified
-  nucleotides surface as a lowercase letter that gets uppercased here.
+- `parent_base`: the canonical base (`"A" / "C" / "G" / "U"`).
 - `trna_chem_comp_id`: the observed CCD code, verbatim.
-- `is_modified`: True iff `trna_chem_comp_id` is a known modified
-  nucleotide (i.e. Gemmi returned a lowercase one-letter code).
+- `is_modified`: True iff the residue is not a canonical base.
+
+Resolution order:
+
+1. **Gemmi tabulated dictionary**
+   (`gemmi.find_tabulated_residue(comp).one_letter_code`). Canonical
+   bases surface as uppercase (`"A"` → `"A"`); modified nucleotides
+   Gemmi knows about surface as lowercase (`"PSU"` → `"u"`).
+2. **Per-component CCD fetch** when Gemmi returns blank /
+   whitespace-only / missing — the package downloads
+   `https://files.rcsb.org/ligands/view/<comp>.cif`, parses the
+   ``_chem_comp.mon_nstd_parent_comp_id`` (preferred) or
+   ``_chem_comp.one_letter_code`` field, and uses that as the
+   authoritative parent base. Cached on disk under the `ccd/`
+   namespace; one network call per unrecognized comp_id per cache
+   lifetime. The CCD is also the source of truth for unusual
+   modifications that Gemmi ships with a blank one-letter code (e.g.
+   `U8U` = 5-methylaminomethyl-2-thiouridine-5′-monophosphate, a
+   *Thermus* tRNA wobble modification).
+3. **First-character heuristic** as a last-resort fallback (network
+   failure, parse failure): use `comp_id[0]` and flag `is_modified =
+   len(comp_id) > 1`. Works for most CCD codes because the PDB
+   convention names modified nucleotides starting with the parent
+   base letter (`PSU` → U, `7MG` → G).
 
 For each codon residue:
 
 - `base`: the residue name (canonical bases are typically what mRNA
   carries; modified bases are rare on coding mRNA).
 - `source`: `"fr3d_observed"`, `"mmcif_reconstructed"`, or
-  `"mrna_frame_inference"` per §30.8.
+  `"mrna_frame_inference"` per §30.9.
 
 ### 30.7 FR3D codon-pairing fallback for missed sites
 
@@ -3495,6 +3519,8 @@ Required `WARNING`-level events:
 - no FR3D pairs found for a site that has a tRNA chain
 - FR3D codon-pairing fallback assigned a previously empty site
   (recorded both in `warnings` and in `classification_evidence`)
+- per-component CCD fetch / parse failure (the package falls back to
+  the first-character heuristic in that case)
 
 ### 30.14 Implementation requirements
 
@@ -3544,6 +3570,12 @@ Coverage requirements:
     alone do not trigger assignment).
 19. Fallback ignores short tRNA chains (< 36 polymer residues) and
     non-tRNA-Rfam chains.
+20. Per-component CCD fetch returns parent base for residues Gemmi's
+    tabulated dictionary doesn't fully describe (e.g. `U8U`).
+21. Per-component CCD fetch caches on disk; second call for the same
+    comp_id is served from the cache (no second HTTP request).
+22. CCD parse failure / network failure falls back to the
+    first-character heuristic without raising.
 
 ### 30.16 References
 

@@ -516,6 +516,7 @@ def cache_info(
         table.add_row("pdbe", str(info.pdbe_entries))
         table.add_row("coords", str(info.coords_entries))
         table.add_row("fr3d", str(info.fr3d_entries))
+        table.add_row("ccd", str(info.ccd_entries))
         table.add_row("raddb", str(raddb_files))
         table.add_row(
             "[bold]total entries",

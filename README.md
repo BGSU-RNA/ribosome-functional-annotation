@@ -339,10 +339,15 @@ v1 out-of-scope:
 
 Every external call is cached on disk at
 `~/.cache/ribosome-state-annotator/` (override with `--cache-dir`,
-disable with `--no-cache`). Six namespaces: `rcsb/`, `bgsu/`, `pdbe/`,
-`coords/`, `fr3d/`, and `raddb/`. The first five are content-addressed
-and never expire — to refresh, use `ribostate cache clear` or delete
-the cache root.
+disable with `--no-cache`). Seven namespaces: `rcsb/`, `bgsu/`,
+`pdbe/`, `coords/`, `fr3d/`, `ccd/`, and `raddb/`. The first six are
+content-addressed and never expire — to refresh, use
+`ribostate cache clear` or delete the cache root. The `ccd/` namespace
+holds per-component PDB Chemical Component Dictionary CIFs, fetched
+lazily on first encounter with a modified nucleotide that Gemmi's
+built-in tabulated dictionary doesn't fully recognize (e.g. `U8U` =
+5-methylaminomethyl-2-thiouridine — a *Thermus* tRNA wobble
+modification).
 
 ### RADdb large-scale movements
 
@@ -447,9 +452,10 @@ of the contact-transfer workflow above.
 | `gemmi_contacts.py` | Gemmi `NeighborSearch` wrapper restricted to the active assembly. |
 | `classify.py` | rRNA-core determination, ribosomal-protein detection, dominant-superkingdom vote, final classification rule. |
 | `infer.py` | Functional chain assignment + tRNA-state inference. Owns the polymer-filtered CCA-end selector for the A-site factor label. |
-| `cache.py` | Content-addressed on-disk cache with five namespaces: `rcsb/`, `bgsu/`, `pdbe/`, `coords/`, `fr3d/`. |
+| `cache.py` | Content-addressed on-disk cache with six namespaces: `rcsb/`, `bgsu/`, `pdbe/`, `coords/`, `fr3d/`, `ccd/`. |
 | `raddb.py` | RADdb integration — download / refresh / parse the LSU↔SSU CSV, lookup motion metrics per `(pdb, lsu, ssu)` triple. |
 | `trna_mrna.py` | FR3D-driven codon/anticodon extraction per A/P/E site (anticodon at polymer-sequence-index 34/35/36; codon = FR3D-observed → mmCIF-reconstructed → mRNA-frame-inferred). |
+| `ccd_client.py` | Per-component PDB Chemical Component Dictionary fetcher; resolves authoritative parent-base + `mon_nstd_parent_comp_id` for modified nucleotides Gemmi's tabulated table doesn't fully describe. |
 | `config.py` | Tunables: contact cutoff, completeness thresholds, network timeouts. |
 | `exceptions.py` | Typed exception hierarchy (`ApiRequestError`, `CorrespondenceMappingError`, `CoordinateDownloadError`, …). |
 | `output.py` | JSON / JSONL / CSV writers. |

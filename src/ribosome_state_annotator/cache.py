@@ -39,6 +39,7 @@ _BGSU_DIR = "bgsu"
 _COORDS_DIR = "coords"
 _PDBE_DIR = "pdbe"
 _FR3D_DIR = "fr3d"
+_CCD_DIR = "ccd"
 
 
 class CacheInfo(BaseModel):
@@ -50,6 +51,7 @@ class CacheInfo(BaseModel):
     coords_entries: int = 0
     pdbe_entries: int = 0
     fr3d_entries: int = 0
+    ccd_entries: int = 0
     total_bytes: int = 0
     exists: bool = False
 
@@ -61,6 +63,7 @@ class CacheInfo(BaseModel):
             + self.coords_entries
             + self.pdbe_entries
             + self.fr3d_entries
+            + self.ccd_entries
         )
 
 
@@ -153,6 +156,27 @@ class Cache:
         _atomic_write_bytes(path, data)
         return path
 
+    # ------------------------------------------------------------------- CCD
+
+    def ccd_path(self, comp_id: str) -> Path:
+        """Per-component CCD CIF cache path."""
+        return self.root / _CCD_DIR / f"{comp_id.upper()}.cif"
+
+    def get_ccd_cif(self, comp_id: str) -> bytes | None:
+        path = self.ccd_path(comp_id)
+        if not path.is_file():
+            return None
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            logger.warning("ccd cache read failed for %s (%s); treating as miss", path, exc)
+            return None
+
+    def put_ccd_cif(self, comp_id: str, data: bytes) -> Path:
+        path = self.ccd_path(comp_id)
+        _atomic_write_bytes(path, data)
+        return path
+
     # ---------------------------------------------------------- Maintenance
 
     def info(self) -> CacheInfo:
@@ -167,6 +191,7 @@ class Cache:
             coords_entries=_count_files(self.root / _COORDS_DIR),
             pdbe_entries=_count_files(self.root / _PDBE_DIR),
             fr3d_entries=_count_files(self.root / _FR3D_DIR),
+            ccd_entries=_count_files(self.root / _CCD_DIR),
             total_bytes=_dir_size(self.root),
         )
 

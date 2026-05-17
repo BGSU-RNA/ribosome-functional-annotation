@@ -34,6 +34,7 @@ import gemmi
 import httpx
 
 from ribosome_state_annotator.cache import Cache
+from ribosome_state_annotator.ccd_client import fetch_chem_comp
 from ribosome_state_annotator.models import (
     Anticodon,
     AnticodonResidue,
@@ -216,22 +217,65 @@ def _build_unit_id(pdb_id: str, chain_id: str, residue: gemmi.Residue) -> str:
     return f"{pdb_id.upper()}|1|{chain_id}|{residue.name}|{residue.seqid.num}"
 
 
-def _parent_base_info(comp_id: str) -> tuple[str, bool]:
+def _parent_base_info(
+    comp_id: str,
+    *,
+    cache: Cache | None = None,
+    client: httpx.Client | None = None,
+) -> tuple[str, bool]:
     """Return ``(parent_base_uppercase, is_modified)`` for a CCD code.
 
-    Uses Gemmi's tabulated chemical-component dictionary. Modified
-    nucleotides surface as a lowercase ``one_letter_code`` (e.g.
-    ``"PSU"`` → ``"u"``); canonical bases stay uppercase
-    (``"A"`` → ``"A"``). When Gemmi doesn't recognise the code, we fall
-    back to treating the comp_id as canonical and not modified — this
-    is the safest behaviour because misclassifying an unknown residue
-    as modified would propagate into the downstream JSON.
+    Resolution order:
+
+    1. **Gemmi tabulated dictionary** (in-process; covers
+       canonical A/C/G/U and most common modifications: ``PSU`` → ``"u"``,
+       ``5MU`` → ``"u"``, ``MIA`` → ``"a"``, etc.).
+    2. **Per-component CCD fetch** when Gemmi returns blank / missing.
+       The authoritative ``mon_nstd_parent_comp_id`` (or
+       ``one_letter_code``) from the PDB CCD entry — covers unusual
+       modifications that ship without a Gemmi one-letter code (e.g.
+       ``U8U`` = 5-methylaminomethyl-2-thiouridine-5'-monophosphate,
+       a *T. thermophilus* tRNA wobble modification). Cached under the
+       ``ccd/`` namespace; one network call per unrecognized comp_id
+       per cache lifetime.
+    3. **First-character heuristic** as last resort: take
+       ``comp_id[0]`` and flag ``is_modified=True`` if the comp_id is
+       longer than one character. Works because PDB CCD names for
+       modified nts almost universally start with the parent base
+       letter (``PSU`` → U, ``7MG`` → G).
+
+    Passing ``cache=None`` / ``client=None`` skips step 2 — useful
+    for tests that don't want to hit the network.
     """
     info = gemmi.find_tabulated_residue(comp_id)
-    if info is None or not info.one_letter_code:
-        return comp_id[:1].upper() if comp_id else "", False
-    letter = info.one_letter_code
-    return letter.upper(), letter.islower()
+    letter = info.one_letter_code if info is not None else None
+    if letter and letter.strip():
+        return letter.upper(), letter.islower()
+
+    if cache is not None or client is not None:
+        ccd_info = fetch_chem_comp(comp_id, cache=cache, client=client)
+        if ccd_info is not None:
+            parent = ccd_info.parent_comp_id or ccd_info.one_letter_code
+            if parent and parent.strip():
+                clean = parent.strip()
+                # If the parent string is a single canonical base, that base
+                # is the parent and we're modified relative to it. If the
+                # CCD's parent reference is itself a multi-char code (rare),
+                # fall back to its first character.
+                parent_letter = clean[:1].upper()
+                is_modified = (
+                    ccd_info.parent_comp_id is not None
+                    and ccd_info.parent_comp_id.strip().upper() != comp_id.upper()
+                )
+                # Also treat a lowercase one_letter_code as modified, mirroring
+                # Gemmi's convention.
+                if ccd_info.parent_comp_id is None and clean.islower():
+                    is_modified = True
+                return parent_letter, is_modified
+
+    if not comp_id:
+        return "", False
+    return comp_id[:1].upper(), len(comp_id) > 1
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +841,8 @@ def extract_trna_mrna_interactions(
             fr3d_rows=fr3d_rows,
             mrna_residues=mrna_residues,
             mrna_index_by_seq_id=mrna_index_by_seq_id,
+            cache=cache,
+            client=client,
         )
         if interaction is not None:
             per_site_interactions[site] = interaction
@@ -850,6 +896,8 @@ def _extract_one_site(
     fr3d_rows: list[_ParsedFr3dRow],
     mrna_residues: list[gemmi.Residue],
     mrna_index_by_seq_id: dict[int, int],
+    cache: Cache | None = None,
+    client: httpx.Client | None = None,
 ) -> TRNAmRNAInteraction | None:
     """Build one site's :class:`TRNAmRNAInteraction`. Returns ``None`` if
     the anticodon residues cannot be picked (tRNA chain too short)."""
@@ -870,7 +918,7 @@ def _extract_one_site(
     chem_comp_id_by_position: dict[int, str] = {}
     for hit in anticodon_hits:
         residue = hit.residue
-        parent, is_modified = _parent_base_info(residue.name)
+        parent, is_modified = _parent_base_info(residue.name, cache=cache, client=client)
         parent_bases_by_position[hit.trna_position] = parent
         is_modified_by_position[hit.trna_position] = is_modified
         chem_comp_id_by_position[hit.trna_position] = residue.name
