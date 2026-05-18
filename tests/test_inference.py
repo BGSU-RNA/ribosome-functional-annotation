@@ -232,6 +232,154 @@ def test_assignment_missing_residue_in_coords_emits_warning(
 
 
 # ---------------------------------------------------------------------------
+# LSU-based fallback for A/P assignment (tRNA analogs, pre-accommodation tRNAs)
+# ---------------------------------------------------------------------------
+
+
+def test_lsu_fallback_assigns_a_when_ssu_anchor_unmapped(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """Synthetic tRNA analogs (no SSU contact) get assigned via LSU PTC.
+
+    Strip the ssu_atrna correspondence so the SSU-based A pass produces
+    nothing; the fallback should then pick TA (which contacts lsu_atrna).
+    """
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    correspondence["ssu_atrna"] = _correspondence("ssu_atrna", [])
+    result = infer.assign_functional_chains(ribosome_fixture, assembly, by_role, correspondence)
+    assert result.aminoacyl_trna_chain is not None
+    assert result.aminoacyl_trna_chain.auth_asym_id == "TA"
+
+
+def test_lsu_fallback_assigns_p_when_ssu_anchor_unmapped(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """Same fallback for the P slot when ssu_ptrna anchors are unmapped."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    correspondence["ssu_ptrna"] = _correspondence("ssu_ptrna", [])
+    result = infer.assign_functional_chains(ribosome_fixture, assembly, by_role, correspondence)
+    assert result.peptidyl_trna_chain is not None
+    assert result.peptidyl_trna_chain.auth_asym_id == "TP"
+
+
+def test_lsu_fallback_does_not_reuse_already_assigned_chain(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """The fallback runs on the candidate pool AFTER mRNA/SSU passes,
+    so a chain already assigned to mRNA cannot be re-picked for A."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    # Move mRNA right next to lsu_atrna so it would win the LSU fallback
+    # if it were still in the pool — but it should be removed after the
+    # mRNA assignment so TA wins instead.
+    correspondence["ssu_atrna"] = _correspondence("ssu_atrna", [])
+    result = infer.assign_functional_chains(ribosome_fixture, assembly, by_role, correspondence)
+    assert result.mrna_chain is not None
+    assert result.aminoacyl_trna_chain is not None
+    assert result.aminoacyl_trna_chain.ife != result.mrna_chain.ife
+
+
+def test_lsu_fallback_produces_star_slash_state_string(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """A-tRNA assigned via LSU fallback has SSU side ``*`` (no decoding-centre
+    contact). For the fixture's TA (contacts lsu_atrna only) the state is
+    ``*/A``."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    correspondence["ssu_atrna"] = _correspondence("ssu_atrna", [])
+    assignments = infer.assign_functional_chains(
+        ribosome_fixture, assembly, by_role, correspondence
+    )
+    states = infer.compute_trna_states(
+        ribosome_fixture, assembly, assignments, correspondence
+    )
+    assert states.aminoacyl_trna_state == "*/A"
+
+
+def test_lsu_fallback_p_produces_star_slash_p_state(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """Mirror of the A-tRNA test for the P slot. With ssu_ptrna empty, TP
+    falls back via lsu_ptrna and produces state ``*/P``."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    correspondence["ssu_ptrna"] = _correspondence("ssu_ptrna", [])
+    assignments = infer.assign_functional_chains(
+        ribosome_fixture, assembly, by_role, correspondence
+    )
+    states = infer.compute_trna_states(
+        ribosome_fixture, assembly, assignments, correspondence
+    )
+    assert states.peptidyl_trna_state == "*/P"
+
+
+def test_ssu_state_uses_double_star_for_short_fragment(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """A CCA-end tRNA analog (length < ASL_FRAGMENT_MAX_LENGTH) gets
+    SSU side ``**`` rather than ``*`` to mark it as structurally too short
+    to reach the decoding centre (7RQA / 8T8C-style analogs).
+
+    The fixture's ``ASL`` chain (20 nt) is positioned next to the LSU
+    atrna anchor here to exercise the LSU-fallback assignment path while
+    confirming the SSU half-state is ``**`` (fragment), not ``*``
+    (displaced full tRNA).
+    """
+    # Build a one-off structure where the short ASL is repositioned to
+    # contact the LSU atrna anchor so the fallback assigns it to A.
+    structure = gemmi.Structure()
+    structure.cell = ribosome_fixture.cell
+    model = gemmi.Model("1")
+    for chain in ribosome_fixture[0]:
+        if chain.name == "ASL":
+            # Move ASL residue 1 onto the LSU atrna anchor (L/20 at
+            # x=20, y=20). Other residues stay short and far from SSU.
+            new_chain = gemmi.Chain("ASL")
+            for i, res in enumerate(chain):
+                new_res = gemmi.Residue()
+                new_res.name = res.name
+                new_res.seqid = res.seqid
+                new_res.entity_type = gemmi.EntityType.Polymer
+                atom = gemmi.Atom()
+                atom.name = "C1'"
+                atom.element = gemmi.Element("C")
+                if i == 0:
+                    atom.pos = gemmi.Position(20.5, 20.0, 0.0)
+                else:
+                    atom.pos = gemmi.Position(200.0 + i, 0.0, 0.0)
+                new_res.add_atom(atom)
+                new_chain.add_residue(new_res)
+            model.add_chain(new_chain)
+        else:
+            model.add_chain(chain.clone())
+    structure.add_model(model)
+
+    s_chain = _chain("S", rfam=("RF00177",))
+    l_chain = _chain("L", rfam=("RF02541",))
+    asl_chain = _chain("ASL", description="A-site tRNA analog (CCA end only)")
+    assembly = _assembly(rna_chains=[s_chain, l_chain, asl_chain], protein_chains=[])
+    by_role: dict[str, list[ChainRef]] = {
+        "ssu_main_rrna": [s_chain],
+        "lsu_main_rrna": [l_chain],
+        "lsu_associated_rrna": [],
+        "trna": [],
+        "unmapped": [asl_chain],
+    }
+    correspondence = {
+        "ssu_atrna": _correspondence("ssu_atrna", []),  # force LSU fallback
+        "ssu_ptrna": _correspondence("ssu_ptrna", []),
+        "lsu_atrna": _correspondence("lsu_atrna", ["RIBOFIXTURE|1|L|U|20"]),
+        "lsu_ptrna": _correspondence("lsu_ptrna", ["RIBOFIXTURE|1|L|U|40"]),
+        "lsu_etrna": _correspondence("lsu_etrna", []),
+    }
+    assignments = infer.assign_functional_chains(structure, assembly, by_role, correspondence)
+    assert assignments.aminoacyl_trna_chain is not None
+    assert assignments.aminoacyl_trna_chain.auth_asym_id == "ASL"
+    states = infer.compute_trna_states(structure, assembly, assignments, correspondence)
+    # Short fragment + no SSU contact → SSU half = "**" (cannot reach),
+    # LSU contact = atrna → LSU half = "A". Full state: "**/A".
+    assert states.aminoacyl_trna_state == "**/A"
+
+
+# ---------------------------------------------------------------------------
 # compute_trna_states — §12 classic states (A/A, P/P, E/E)
 # ---------------------------------------------------------------------------
 
@@ -366,7 +514,13 @@ def test_atrna_double_star_for_asl_fragment(
     ribosome_fixture: gemmi.Structure,
 ) -> None:
     """An A-tRNA chain with fewer than 30 residues triggers the ASL fragment
-    branch and produces "<SSU>/**" regardless of nearby protein factors."""
+    branch on the LSU side and produces ``"<SSU>/**"``.
+
+    In the fixture ASL is positioned far from every anchor, so the SSU
+    side also falls through. Because the chain is *short* (under
+    :data:`constants.ASL_FRAGMENT_MAX_LENGTH`) it can't physically reach
+    either subunit, so the full state is ``**/**`` rather than ``*/**``.
+    """
     s_chain = _chain("S", rfam=("RF00177",))
     l_chain = _chain("L", rfam=("RF02541",))
     asl_chain = _chain("ASL", description="tRNA anticodon stem-loop")
@@ -391,10 +545,11 @@ def test_atrna_double_star_for_asl_fragment(
     correspondence = {
         "lsu_atrna": _correspondence("lsu_atrna", []),
         "lsu_ptrna": _correspondence("lsu_ptrna", []),
+        "ssu_atrna": _correspondence("ssu_atrna", []),
         "ssu_ptrna": _correspondence("ssu_ptrna", []),
     }
     states = infer.compute_trna_states(ribosome_fixture, assembly, assignments, correspondence)
-    assert states.aminoacyl_trna_state == "A/**"
+    assert states.aminoacyl_trna_state == "**/**"
 
 
 # ---------------------------------------------------------------------------

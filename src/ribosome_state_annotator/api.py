@@ -574,6 +574,13 @@ def _run_assignment_for_assembly(
     )
     site_warnings.extend(states.warnings)
 
+    # Safeguard: a state of ``**/**`` means the chain is a too-short
+    # fragment with no anchor contact on either subunit. The assignment
+    # passes already require an anchor contact within cutoff, so this
+    # should not appear from the normal pipeline — but defensive against
+    # pathological inputs we demote the chain to unmapped_rna_chains.
+    assignments, states = _demote_no_contact_fragments(assignments, states)
+
     annotation = _build_annotated_annotation(
         assembly=assembly,
         by_role=by_role,
@@ -733,6 +740,35 @@ def _annotate_multi_ribosome_bundle(
         annotations.append(annotation)
 
     return annotations
+
+
+_NO_CONTACT_FRAGMENT_STATE = "**/**"
+
+
+def _demote_no_contact_fragments(
+    assignments: ChainAssignments,
+    states: TRNAStates,
+) -> tuple[ChainAssignments, TRNAStates]:
+    """Clear A or P chain assignments whose state is ``**/**``.
+
+    A state of ``**/**`` means the chain is shorter than
+    :data:`constants.ASL_FRAGMENT_MAX_LENGTH` and makes no anchor contact
+    on either subunit. Such a chain shouldn't be claiming a tRNA role —
+    let it fall through to ``unmapped_rna_chains`` instead.
+    """
+    chain_updates: dict[str, Any] = {}
+    state_updates: dict[str, Any] = {}
+    if states.aminoacyl_trna_state == _NO_CONTACT_FRAGMENT_STATE:
+        chain_updates["aminoacyl_trna_chain"] = None
+        state_updates["aminoacyl_trna_state"] = None
+    if states.peptidyl_trna_state == _NO_CONTACT_FRAGMENT_STATE:
+        chain_updates["peptidyl_trna_chain"] = None
+        state_updates["peptidyl_trna_state"] = None
+    if chain_updates:
+        assignments = assignments.model_copy(update=chain_updates)
+    if state_updates:
+        states = states.model_copy(update=state_updates)
+    return assignments, states
 
 
 def _reference_subunit_chains(

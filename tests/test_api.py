@@ -308,6 +308,44 @@ def test_annotate_assembly_missing_assembly_returns_failed() -> None:
     assert "assembly_not_found" in (ann.skip_reason or "")
 
 
+def test_demote_no_contact_fragments_clears_double_star_states() -> None:
+    """When a tRNA state is `**/**` (fragment with no anchor contact on
+    either subunit) the safeguard demotes the chain to unmapped so it
+    doesn't claim a tRNA role."""
+    from ribosome_state_annotator.infer import ChainAssignments, TRNAStates
+    from ribosome_state_annotator.models import ChainRef
+
+    fragment = ChainRef(
+        pdb_id="TEST",
+        assembly_id="1",
+        auth_asym_id="X",
+        polymer_type="RNA",
+    )
+    assignments = ChainAssignments(aminoacyl_trna_chain=fragment)
+    states = TRNAStates(aminoacyl_trna_state="**/**")
+    new_assignments, new_states = api._demote_no_contact_fragments(assignments, states)
+    assert new_assignments.aminoacyl_trna_chain is None
+    assert new_states.aminoacyl_trna_state is None
+
+
+def test_demote_no_contact_fragments_preserves_real_assignments() -> None:
+    """A canonical `A/A` state is untouched by the safeguard."""
+    from ribosome_state_annotator.infer import ChainAssignments, TRNAStates
+    from ribosome_state_annotator.models import ChainRef
+
+    real = ChainRef(
+        pdb_id="TEST",
+        assembly_id="1",
+        auth_asym_id="TA",
+        polymer_type="RNA",
+    )
+    assignments = ChainAssignments(aminoacyl_trna_chain=real)
+    states = TRNAStates(aminoacyl_trna_state="A/A")
+    new_assignments, new_states = api._demote_no_contact_fragments(assignments, states)
+    assert new_assignments.aminoacyl_trna_chain is real
+    assert new_states.aminoacyl_trna_state == "A/A"
+
+
 # ---------------------------------------------------------------------------
 # annotate_many
 # ---------------------------------------------------------------------------
