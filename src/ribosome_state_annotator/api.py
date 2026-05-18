@@ -34,6 +34,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+import gemmi
 import httpx
 
 from ribosome_state_annotator import constants as C
@@ -76,6 +77,11 @@ from ribosome_state_annotator.models import (
     LargeScaleMovements,
     LigandRef,
     RibosomeAnnotation,
+)
+from ribosome_state_annotator.multiribo import (
+    detect_multi_ribosome,
+    pair_ssu_lsu_by_centroid,
+    partition_chains_by_ribosome,
 )
 from ribosome_state_annotator.pdbe_client import (
     fetch_rfam_mappings,
@@ -226,7 +232,7 @@ def annotate_pdb(
 
     results: list[RibosomeAnnotation] = []
     for assembly in assemblies:
-        results.append(
+        results.extend(
             _annotate_one_assembly(
                 assembly,
                 cache=resolved_cache,
@@ -250,9 +256,17 @@ def annotate_assembly(
 ) -> RibosomeAnnotation:
     """Annotate one biological assembly. Convenience wrapper.
 
-    Returns the single :class:`RibosomeAnnotation` for ``(pdb_id, assembly_id)``.
+    Returns the :class:`RibosomeAnnotation` for ``(pdb_id, assembly_id)``.
+
+    Multi-ribosome bundles (e.g. ``8R3V`` assembly ``1``) are split into
+    sub-annotations with suffixed assembly IDs (``"1-1"``, ``"1-2"``).
+    ``assembly_id="1-1"`` returns that specific sub-ribosome;
+    ``assembly_id="1"`` returns the first sub-ribosome (with a warning
+    on the annotation). Callers that need every sub-ribosome should use
+    :func:`annotate_pdb` instead.
     """
-    results = annotate_pdb(pdb_id, assembly_id=assembly_id, **kwargs)
+    base_assembly_id = assembly_id.split("-", 1)[0]
+    results = annotate_pdb(pdb_id, assembly_id=base_assembly_id, **kwargs)
     if not results:
         return RibosomeAnnotation(
             pdb_id=pdb_id.upper(),
@@ -260,6 +274,9 @@ def annotate_assembly(
             status="failed",
             skip_reason=f"assembly_not_found: {assembly_id}",
         )
+    for ann in results:
+        if ann.assembly_id == assembly_id:
+            return ann
     return results[0]
 
 
@@ -328,6 +345,12 @@ def annotate_many(
 # ---------------------------------------------------------------------------
 
 
+WARNING_MULTI_RIBOSOME_SPLIT = "multi_ribosome_bundle_split"
+"""Emitted on each sub-ribosome annotation when an assembly was split
+into multiple :class:`RibosomeAnnotation` results because it packed
+multiple complete SSU+LSU pairs (e.g. 8R3V, 9O3L)."""
+
+
 def _annotate_one_assembly(
     assembly: AssemblyContext,
     *,
@@ -340,7 +363,15 @@ def _annotate_one_assembly(
     client: httpx.Client | None,
     raddb_dataset: RADdbDataset | None = None,
     no_fr3d: bool = False,
-) -> RibosomeAnnotation:
+) -> list[RibosomeAnnotation]:
+    """Annotate one biological assembly, returning one or more annotations.
+
+    Most assemblies return a single-element list. Multi-ribosome bundles
+    (e.g. Mycobacterium 70S dimers like 8R3V) are split into one
+    annotation per ribosome, each carrying a suffixed ``assembly_id``
+    such as ``"1-1"`` / ``"1-2"`` so downstream CSV consumers see one
+    row per ribosome.
+    """
     pdb_id = assembly.pdb_id
     aid = assembly.assembly_id
 
@@ -351,13 +382,43 @@ def _annotate_one_assembly(
         strict_complete_check=strict_complete_check,
     )
     if classification_result.is_skip:
-        return _build_skip_annotation(assembly, classification_result)
+        return [_build_skip_annotation(assembly, classification_result)]
 
     by_role = partition_rna_chains_by_role(assembly.rna_chains)
 
     warnings: list[str] = list(classification_result.warnings)
-    if len(by_role.get("ssu_main_rrna", [])) > 1 or len(by_role.get("lsu_main_rrna", [])) > 1:
-        warnings.append(WARNING_MULTIPLE_CHAINS_FOR_LEGACY_CSV)
+    n_ribosomes = detect_multi_ribosome(by_role)
+    n_ssu = len(by_role.get("ssu_main_rrna", []))
+    n_lsu = len(by_role.get("lsu_main_rrna", []))
+    if n_ribosomes == 1 and (n_ssu >= 2 or n_lsu >= 2) and n_ssu != n_lsu:
+        # Fragmented rRNA: asymmetric SSU/LSU chain counts (e.g. one SSU
+        # chain with the 28S split into LSUa/LSUb/SR2 fragments). The
+        # canonical BGSU anchors don't transfer onto fragmented chains
+        # because the anchor residue numbers are relative to a single
+        # reference rRNA molecule, so contact-transfer can't resolve A/P/E
+        # sites. Skip with a clear reason; batch callers continue to the
+        # next entry.
+        logger.info(
+            "fragmented ribosome detected for %s assembly %s (SSU chains=%d, LSU chains=%d); skipping",
+            pdb_id,
+            aid,
+            n_ssu,
+            n_lsu,
+        )
+        return [
+            RibosomeAnnotation(
+                pdb_id=pdb_id,
+                assembly_id=aid,
+                status="skipped",
+                skip_reason=C.SKIP_FRAGMENTED_RIBOSOME,
+                ribosome_classification=classification_result.classification,
+                ssu_main_rrna_chains=by_role.get("ssu_main_rrna", []),
+                lsu_main_rrna_chains=by_role.get("lsu_main_rrna", []),
+                lsu_associated_rrna_chains=by_role.get("lsu_associated_rrna", []),
+                classification_evidence=classification_result.evidence,
+                warnings=warnings,
+            )
+        ]
 
     # Reference set selection per §6.4
     assert classification_result.classification is not None
@@ -425,18 +486,73 @@ def _annotate_one_assembly(
         )
     except (CoordinateDownloadError, CoordinateParsingError) as exc:
         logger.error("coordinate failure for %s assembly %s: %s", pdb_id, aid, exc)
-        return RibosomeAnnotation(
-            pdb_id=pdb_id,
-            assembly_id=aid,
-            status="failed",
-            skip_reason=f"coordinate_failure: {exc}",
-            ribosome_classification=classification_result.classification,
-            ssu_main_rrna_chains=by_role.get("ssu_main_rrna", []),
-            lsu_main_rrna_chains=by_role.get("lsu_main_rrna", []),
-            lsu_associated_rrna_chains=by_role.get("lsu_associated_rrna", []),
-            classification_evidence=classification_result.evidence,
+        return [
+            RibosomeAnnotation(
+                pdb_id=pdb_id,
+                assembly_id=aid,
+                status="failed",
+                skip_reason=f"coordinate_failure: {exc}",
+                ribosome_classification=classification_result.classification,
+                ssu_main_rrna_chains=by_role.get("ssu_main_rrna", []),
+                lsu_main_rrna_chains=by_role.get("lsu_main_rrna", []),
+                lsu_associated_rrna_chains=by_role.get("lsu_associated_rrna", []),
+                classification_evidence=classification_result.evidence,
+                warnings=warnings,
+            )
+        ]
+
+    # Multi-ribosome bundle: split into per-ribosome sub-contexts and
+    # emit one annotation per ribosome.
+    if n_ribosomes >= 2:
+        return _annotate_multi_ribosome_bundle(
+            assembly=assembly,
+            structure=structure,
+            by_role=by_role,
+            reference_units=reference_units,
+            correspondence_by_site=correspondence_by_site,
+            classification_result=classification_result,
             warnings=warnings,
+            cache=cache,
+            client=client,
+            cutoff=cutoff,
+            raddb_dataset=raddb_dataset,
+            no_fr3d=no_fr3d,
         )
+
+    annotation = _run_assignment_for_assembly(
+        assembly=assembly,
+        structure=structure,
+        by_role=by_role,
+        correspondence_by_site=correspondence_by_site,
+        classification_result=classification_result,
+        warnings=warnings,
+        cutoff=cutoff,
+        cache=cache,
+        client=client,
+        raddb_dataset=raddb_dataset,
+        no_fr3d=no_fr3d,
+    )
+    return [annotation]
+
+
+def _run_assignment_for_assembly(
+    *,
+    assembly: AssemblyContext,
+    structure: gemmi.Structure,
+    by_role: dict[str, list[ChainRef]],
+    correspondence_by_site: dict[str, CorrespondenceResult],
+    classification_result: ClassificationResult,
+    warnings: list[str],
+    cutoff: float,
+    cache: Cache | None,
+    client: httpx.Client | None,
+    raddb_dataset: RADdbDataset | None,
+    no_fr3d: bool,
+) -> RibosomeAnnotation:
+    """Run the assignment + state + FR3D pipeline for one (sub-)assembly."""
+    pdb_id = assembly.pdb_id
+    aid = assembly.assembly_id
+    site_warnings = list(warnings)
 
     logger.info("assigning functional chains for %s assembly %s", pdb_id, aid)
     assignments = assign_functional_chains(
@@ -446,7 +562,7 @@ def _annotate_one_assembly(
         correspondence_by_site,
         cutoff=cutoff,
     )
-    warnings.extend(assignments.warnings)
+    site_warnings.extend(assignments.warnings)
 
     logger.info("computing tRNA states for %s assembly %s", pdb_id, aid)
     states = compute_trna_states(
@@ -456,7 +572,7 @@ def _annotate_one_assembly(
         correspondence_by_site,
         cutoff=cutoff,
     )
-    warnings.extend(states.warnings)
+    site_warnings.extend(states.warnings)
 
     annotation = _build_annotated_annotation(
         assembly=assembly,
@@ -464,7 +580,7 @@ def _annotate_one_assembly(
         classification_result=classification_result,
         assignments=assignments,
         states=states,
-        warnings=warnings,
+        warnings=site_warnings,
         raddb_dataset=raddb_dataset,
     )
 
@@ -486,6 +602,223 @@ def _annotate_one_assembly(
             annotation.trna_mrna_interactions = []
 
     return annotation
+
+
+def _annotate_multi_ribosome_bundle(
+    *,
+    assembly: AssemblyContext,
+    structure: gemmi.Structure,
+    by_role: dict[str, list[ChainRef]],
+    reference_units: Mapping[str, tuple[str, ...]],
+    correspondence_by_site: dict[str, CorrespondenceResult],
+    classification_result: ClassificationResult,
+    warnings: list[str],
+    cache: Cache | None,
+    client: httpx.Client | None,
+    cutoff: float,
+    raddb_dataset: RADdbDataset | None,
+    no_fr3d: bool,
+) -> list[RibosomeAnnotation]:
+    """Split a multi-ribosome assembly and emit one annotation per ribosome.
+
+    Pairing rule: greedy nearest-centroid SSU↔LSU. Each non-rRNA RNA
+    chain is partitioned to the ribosome whose combined SSU+LSU centroid
+    it is closest to. Non-ribosomal proteins are partitioned the same
+    way (each ribosome carries its own bound factors).
+
+    Per-ribosome correspondence resolution: BGSU's NR set typically maps
+    each canonical anchor to **one** chain per subunit (e.g. for 8R3V
+    only chains ``A1`` and ``72`` are mapped, even though the deposit
+    has ``A1+71`` and ``A2+72`` as its two ribosomes). To rescue the
+    other ribosome's tRNAs the bundle handler rebuilds a per-ribosome
+    :class:`CorrespondenceResult` using the same-organism chain
+    substitution fallback (§5.2.2), substituting the BGSU
+    representative chain with this ribosome's SSU/LSU author IDs.
+    """
+    pairs = pair_ssu_lsu_by_centroid(
+        structure,
+        by_role.get("ssu_main_rrna", []),
+        by_role.get("lsu_main_rrna", []),
+    )
+    if len(pairs) < 2:
+        # Pairing failed (centroid lookup misses) — fall back to single-
+        # ribosome path so the assembly still gets some annotation.
+        logger.warning(
+            "multi-ribosome split for %s assembly %s degenerated to %d pair(s); "
+            "falling back to single-ribosome path",
+            assembly.pdb_id,
+            assembly.assembly_id,
+            len(pairs),
+        )
+        single = _run_assignment_for_assembly(
+            assembly=assembly,
+            structure=structure,
+            by_role=by_role,
+            correspondence_by_site=correspondence_by_site,
+            classification_result=classification_result,
+            warnings=warnings,
+            cutoff=cutoff,
+            cache=cache,
+            client=client,
+            raddb_dataset=raddb_dataset,
+            no_fr3d=no_fr3d,
+        )
+        return [single]
+
+    # Partition non-main-rRNA RNA chains and protein chains by geometric
+    # proximity to each ribosome.
+    non_main_rna = [
+        c for c in assembly.rna_chains
+        if c not in by_role.get("ssu_main_rrna", []) and c not in by_role.get("lsu_main_rrna", [])
+    ]
+    rna_groups = partition_chains_by_ribosome(structure, pairs, non_main_rna)
+    protein_groups = partition_chains_by_ribosome(structure, pairs, assembly.protein_chains)
+
+    # Identify the reference SSU/LSU chain segments once — these are the
+    # BGSU "representative" chains we'll substitute per ribosome.
+    ssu_ref_chain, lsu_ref_chain = _reference_subunit_chains(reference_units)
+
+    annotations: list[RibosomeAnnotation] = []
+    for index, ((ssu, lsu), rna_chain_ids, protein_chain_ids) in enumerate(
+        zip(pairs, rna_groups, protein_groups, strict=True), start=1
+    ):
+        sub_warnings = list(warnings)
+        sub_warnings.append(WARNING_MULTI_RIBOSOME_SPLIT)
+
+        # Carve out the per-ribosome chain set: this ribosome's SSU + LSU +
+        # geometrically-proximate other RNA chains + per-ribosome proteins.
+        sub_rna_chains = [ssu, lsu] + [c for c in non_main_rna if c.auth_asym_id in rna_chain_ids]
+        sub_protein_chains = [c for c in assembly.protein_chains if c.auth_asym_id in protein_chain_ids]
+
+        sub_by_role = partition_rna_chains_by_role(sub_rna_chains)
+        sub_assembly = AssemblyContext(
+            pdb_id=assembly.pdb_id,
+            assembly_id=f"{assembly.assembly_id}-{index}",
+            experimental_methods=list(assembly.experimental_methods),
+            rna_chains=sub_rna_chains,
+            protein_chains=sub_protein_chains,
+            ligands=list(assembly.ligands),
+            coordinate_path=assembly.coordinate_path,
+        )
+
+        # Per-ribosome correspondence: re-run the BGSU fetch (cache-resident)
+        # with this ribosome's SSU/LSU as substitution targets so the
+        # §5.2.2 fallback covers the anchors BGSU left pointing at the
+        # *other* ribosome's chains.
+        sub_correspondence = _rebuild_correspondence_for_ribosome(
+            reference_units=reference_units,
+            target_pdb_id=assembly.pdb_id,
+            assembly_chains={c.auth_asym_id for c in (*sub_rna_chains, *sub_protein_chains)},
+            ssu_ref_chain=ssu_ref_chain,
+            lsu_ref_chain=lsu_ref_chain,
+            ssu_target_chain=ssu.auth_asym_id,
+            lsu_target_chain=lsu.auth_asym_id,
+            cache=cache,
+            client=client,
+        )
+
+        annotation = _run_assignment_for_assembly(
+            assembly=sub_assembly,
+            structure=structure,
+            by_role=sub_by_role,
+            correspondence_by_site=sub_correspondence,
+            classification_result=classification_result,
+            warnings=sub_warnings,
+            cutoff=cutoff,
+            cache=cache,
+            client=client,
+            raddb_dataset=raddb_dataset,
+            no_fr3d=no_fr3d,
+        )
+        annotations.append(annotation)
+
+    return annotations
+
+
+def _reference_subunit_chains(
+    reference_units: Mapping[str, tuple[str, ...]],
+) -> tuple[str | None, str | None]:
+    """Return ``(ssu_ref_chain, lsu_ref_chain)`` parsed from the first SSU and
+    LSU reference units. Both may be ``None`` if the corresponding set is
+    empty (shouldn't happen for known classifications)."""
+    from ribosome_state_annotator.correspondence import parse_unit_id
+
+    ssu_ref: str | None = None
+    lsu_ref: str | None = None
+    for site_key, units in reference_units.items():
+        if not units:
+            continue
+        try:
+            parsed = parse_unit_id(units[0])
+        except ValueError:
+            continue
+        if site_key.startswith("ssu") and ssu_ref is None:
+            ssu_ref = parsed.chain
+        elif site_key.startswith("lsu") and lsu_ref is None:
+            lsu_ref = parsed.chain
+    return ssu_ref, lsu_ref
+
+
+def _rebuild_correspondence_for_ribosome(
+    *,
+    reference_units: Mapping[str, tuple[str, ...]],
+    target_pdb_id: str,
+    assembly_chains: set[str],
+    ssu_ref_chain: str | None,
+    lsu_ref_chain: str | None,
+    ssu_target_chain: str,
+    lsu_target_chain: str,
+    cache: Cache | None,
+    client: httpx.Client | None,
+) -> dict[str, CorrespondenceResult]:
+    """Rebuild per-site :class:`CorrespondenceResult` for one ribosome.
+
+    Re-uses :func:`_get_or_fetch_subunit_correspondence` with this
+    ribosome's SSU/LSU as the substitution targets. The BGSU fetch is
+    cache-resident so this adds no network cost — the rebuild
+    re-applies the §5.2.2 filter + chain-substitution fallback against
+    the per-ribosome ``assembly_chains`` and ``chain_substitution``,
+    which is what produces the correct anchor residues even when
+    BGSU's NR response only mapped one of the two SSU (or LSU) chains.
+    """
+    chain_substitution: dict[str, str] = {}
+    if ssu_ref_chain is not None:
+        chain_substitution[ssu_ref_chain] = ssu_target_chain
+    if lsu_ref_chain is not None:
+        chain_substitution[lsu_ref_chain] = lsu_target_chain
+
+    out: dict[str, CorrespondenceResult] = {}
+    for subunit in ("ssu", "lsu"):
+        subunit_groups = {
+            key: list(units)
+            for key, units in reference_units.items()
+            if key.startswith(f"{subunit}_") and units
+        }
+        if not subunit_groups:
+            continue
+        try:
+            subunit_results = _get_or_fetch_subunit_correspondence(
+                subunit_groups,
+                target_pdb_id=target_pdb_id,
+                assembly_chains=assembly_chains,
+                chain_substitution=chain_substitution,
+                cache=cache,
+                client=client,
+            )
+        except (ApiRequestError, CorrespondenceMappingError) as exc:
+            # Shouldn't happen on the warm cache path that fed the
+            # bundle-wide call, but degrade gracefully if it does.
+            logger.warning(
+                "per-ribosome correspondence rebuild failed for %s subunit %s: %s",
+                target_pdb_id,
+                subunit,
+                exc,
+            )
+            for site_key in subunit_groups:
+                out[site_key] = CorrespondenceResult(reference_key=site_key)
+            continue
+        out.update(subunit_results)
+    return out
 
 
 # ---------------------------------------------------------------------------

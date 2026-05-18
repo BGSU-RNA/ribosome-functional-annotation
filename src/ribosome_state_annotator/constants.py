@@ -252,6 +252,14 @@ SKIP_LOW_PROTEIN_COUNT: Final[str] = "likely_partial_ribosome_low_ribosomal_prot
 SKIP_AMBIGUOUS_CLASSIFICATION: Final[str] = "ambiguous_ribosome_classification"
 SKIP_AMBIGUOUS_RRNA_CORE: Final[str] = "ambiguous_rrna_core"
 SKIP_INSUFFICIENT_TAXONOMY: Final[str] = "insufficient_taxonomy_evidence"
+SKIP_FRAGMENTED_RIBOSOME: Final[str] = "fragmented_ribosome_not_supported"
+"""Emitted when the assembly carries asymmetric SSU/LSU rRNA chain
+counts (e.g. one SSU chain with a 28S rRNA split across three LSU
+chains, as in Tetrahymena / Trypanosoma / human mitoribosome deposits).
+The canonical BGSU anchors are numbered against a single reference
+rRNA molecule and don't transfer onto fragmented chains, so the
+contact-transfer step cannot resolve A/P/E sites. Multi-ribosome
+bundles (matched SSU/LSU counts) are still supported."""
 
 CLASSIFICATION_RULE_BACTERIAL: Final[str] = "bacterial_like_rfam_plus_bacterial_proteins"
 CLASSIFICATION_RULE_EUKARYOTIC: Final[str] = "eukaryotic_like_rfam_plus_eukaryotic_proteins"
