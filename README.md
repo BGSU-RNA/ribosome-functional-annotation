@@ -59,10 +59,18 @@ large-subunit site:
   complexes in which IF2 (bacteria) or eIF5B (eukaryotes) engages
   the acceptor stem of the initiator tRNA. Refer to
   [`REFERENCES.md`](./REFERENCES.md) for the canonical structures.
-- **Missing-contact placeholders** — `*` indicates that no contact
-  was detected at that subunit; `**` indicates that contact was
-  detected but could not be labelled (typically a tRNA
-  anticodon-stem-loop fragment too short to resolve unambiguously).
+- **Missing-contact placeholders** — applied symmetrically to either
+  half of the state string. `*` indicates the chain is **full-length
+  (≥ 30 nt)** but doesn't make a canonical contact at that subunit —
+  typically a positionally-displaced tRNA (e.g. a pre-accommodation
+  A-tRNA whose acceptor end is at the PTC but whose anticodon end
+  isn't yet paired with the mRNA, giving `*/AP`). `**` indicates the
+  chain is **shorter than 30 nt** and physically cannot reach that
+  subunit — anticodon-stem-loop fragments at the SSU give `<state>/**`;
+  CCA-end-only tRNA analogs at the PTC (e.g. in 7RQA, 8T8C) give
+  `**/<state>`. A chain that's a fragment with no anchor contact on
+  either subunit (state `**/**`) is demoted to ``unmapped_rna_chains``
+  rather than claiming a tRNA role.
 
 In addition to the per-tRNA functional state, each assembly is
 annotated with two **large-scale movement** metrics from the RAD
@@ -90,24 +98,44 @@ package leverages this conservation through a four-stage pipeline:
 1. **Retrieve and classify.** Entry metadata is pulled from the RCSB
    GraphQL API (augmented with PDBe REST Rfam mappings for rRNA
    chains) and the assembly is classified as bacterial, eukaryotic
-   cytoplasmic, or eukaryotic organellar.
+   cytoplasmic, or eukaryotic organellar. When PDBe over-annotates a
+   chain with multiple cross-family Rfam hits (giving a MIXED rRNA
+   core), the classifier defers the resolution until the dominant
+   protein-superkingdom vote is computed and demotes MIXED to
+   whichever flavour matches the protein vote.
 2. **Project reference anchors.** Curated functional-site
-   nucleotides from a reference ribosome (*E. coli* 5J7L for
-   bacterial and organellar systems; *S. cerevisiae* 7ZW0 for
-   eukaryotic cytoplasmic systems) are mapped onto the query rRNA
-   via the BGSU RNA correspondence API, which uses Rfam-based
+   nucleotides from a reference ribosome are mapped onto the query
+   rRNA via the BGSU RNA correspondence API, which uses Rfam-based
    covariance alignments to identify evolutionarily equivalent
-   positions across distantly related organisms.
-3. **Detect contacts.** The biological-assembly mmCIF is downloaded
-   and a Gemmi neighbour search identifies the chains in the query
-   structure that physically contact each set of projected anchors.
-4. **Assign and label.** The contacting chains are assigned to the
-   mRNA, A-tRNA, P-tRNA, and E-tRNA roles. The SSU/LSU contact
-   pattern of each tRNA determines its functional state (classical,
-   hybrid, or chimeric — see the vocabulary above), and an
-   additional neighbour search around the A-tRNA's CCA end
-   identifies the bound elongation or release factor when one is
-   present.
+   positions across distantly related organisms. The reference set
+   is picked per classification: *E. coli* 5J7L for bacterial,
+   *S. cerevisiae* 7ZW0 for eukaryotic cytoplasmic, and a filtered
+   variant of the *E. coli* set for organellar (4 anchors removed
+   because the corresponding E. coli residues have no mt-rRNA
+   equivalent; BGSU's structural alignment cross-walks the remaining
+   16 to mt-12S / mt-16S residues in the deposit's native numbering).
+3. **Split multi-ribosome bundles.** Some deposits pack multiple
+   complete ribosomes into a single biological assembly (di-ribosomes,
+   in-situ polysomes — e.g. 8R3V, 9O3L, 9B0S). When ≥ 2 SSU chains
+   pair with ≥ 2 LSU chains, the assembly is split into per-ribosome
+   sub-contexts by greedy nearest-centroid SSU↔LSU pairing; each
+   ribosome receives its own annotation with a suffixed `assembly_id`
+   (`1-1`, `1-2`, …).
+4. **Detect contacts and assign.** The biological-assembly mmCIF is
+   downloaded and a Gemmi neighbour search identifies the chains in
+   the query structure that physically contact each set of projected
+   anchors. Chains are assigned to mRNA, A-tRNA, P-tRNA, and E-tRNA
+   roles by closest-anchor proximity. After the canonical SSU-anchor
+   pass, an LSU-based fallback fills any unfilled A or P slot using
+   `lsu_atrna` / `lsu_ptrna` proximity — this recovers tRNA analogs
+   that engage only the PTC (7RQA, 8T8C) and pre-accommodation
+   full tRNAs whose anticodon end hasn't yet engaged the decoding
+   centre (3JAG, 7O7Z, 7OSM, 7UG7).
+5. **Label states.** The SSU/LSU contact pattern of each tRNA
+   determines its functional state (classical, hybrid, chimeric, or
+   the fragment/displaced placeholders described above), and an
+   additional neighbour search around the A- or P-tRNA's CCA end
+   identifies any bound elongation, release, or initiation factor.
 
 This **contact-transfer annotation** workflow transfers functional
 identity through three-dimensional contacts to conserved positions,
@@ -136,11 +164,13 @@ flowchart TD
     %% Processing stages
     Fetch["Fetch entry metadata;<br/>augment rRNA Rfam"]:::proc
     Classify{"Classify assembly"}:::decision
-    Skip(["Skip<br/>(NMR, archaeal,<br/>partial, unsupported)"]):::io
-    SelectRef["Select reference ribosome<br/>5J7L · 7ZW0"]:::proc
+    Skip(["Skip<br/>(NMR, archaeal, partial,<br/>fragmented, unsupported)"]):::io
+    Split{"Multi-ribosome<br/>bundle?"}:::decision
+    SplitGeom["Split into per-ribosome sub-contexts<br/>(greedy nearest-centroid SSU↔LSU pairing)"]:::proc
+    SelectRef["Select reference ribosome<br/>5J7L · 7ZW0 · 5J7L-organellar"]:::proc
     Anchors["Project functional-site anchors<br/>onto query rRNA"]:::proc
     Contacts["Gemmi neighbour search<br/>against projected anchors"]:::proc
-    Assign["Assign mRNA, A/P/E tRNA;<br/>infer states; label factor at CCA end"]:::proc
+    Assign["Assign mRNA, A/P/E tRNA<br/>(SSU pass + LSU fallback);<br/>infer states; label factor at CCA end"]:::proc
     Movements["Look up inter-subunit +<br/>SSU-head rotation"]:::proc
     Codon["Extract codon ↔ anticodon<br/>per A/P/E site<br/>(FR3D pairing fallback for missed sites)"]:::proc
 
@@ -154,7 +184,10 @@ flowchart TD
 
     Fetch -->|per biological assembly| Classify
     Classify -->|unsupported| Skip
-    Classify -->|supported| SelectRef
+    Classify -->|supported| Split
+    Split -->|"yes (≥ 2 SSU + ≥ 2 LSU)"| SplitGeom
+    Split -->|no| SelectRef
+    SplitGeom -->|per ribosome| SelectRef
     SelectRef --> Anchors
     BGSU --> Anchors
     Anchors --> Contacts
@@ -171,11 +204,14 @@ flowchart TD
 
 External data sources are shown in blue, in-package processing stages
 in white, and inputs/outputs in green. A PDB entry may contain
-multiple biological assemblies (e.g. 4V5Q contains two); the
-classify-through-codon block is executed once per assembly,
-independently, so that each assembly receives its own functional-chain
-assignment, tRNA states, motion metrics, and codon-anticodon
-evidence.
+multiple biological assemblies (e.g. 4V5Q contains two), and one
+biological assembly may itself contain multiple complete ribosomes
+(di-ribosomes / in-situ polysomes, e.g. 8R3V); the
+classify-through-codon block executes once per ribosome, so each
+ribosome receives its own functional-chain assignment, tRNA states,
+motion metrics, and codon-anticodon evidence. Multi-ribosome bundles
+appear in the output with suffixed assembly IDs (`1-1`, `1-2`, …);
+single-ribosome assemblies keep their plain assembly ID.
 
 ## Installation
 
@@ -317,11 +353,16 @@ write_chain_csv(annotations, Path("chain.csv"))
 |--------|--------------|-------|
 | JSON | Default, or `--output foo.json` | Full `RibosomeAnnotation` list. Field layout defined in `models.py`. |
 | JSONL | `--output foo.jsonl` | One annotation per line; intended for streaming consumers. |
-| `ribosome_chain_annotation.csv` | Default companion (suppressed by `--no-csv`) | One row per annotated assembly across 13 columns. Matches the legacy prototype byte-for-byte. |
+| `ribosome_chain_annotation.csv` | Default companion (suppressed by `--no-csv`) | One row per annotated ribosome (one row per assembly for single-ribosome cases; one row per sub-ribosome for multi-ribosome bundles) across 13 columns. Matches the legacy prototype byte-for-byte. |
 | `ribosome_assembly_annotation.csv` | Default companion | One row per `(property, value)` tuple: species, non-ribosomal proteins, bound ligands, unmapped RNA chains, plus v1 extensions (classification, superkingdom). Warnings are not written to CSV; they remain in the JSON output and the live log stream. |
 
 Skipped and failed annotations appear in the JSON output but are
 omitted from the CSV files.
+
+For multi-ribosome bundles the `assembly_id` field carries a numeric
+suffix (`"1-1"`, `"1-2"`, …) so each ribosome occupies its own row in
+the chain-level CSV and its own annotation object in the JSON. Single-
+ribosome assemblies keep their plain `assembly_id` (`"1"`, `"2"`, …).
 
 ## Known limitations
 
@@ -351,7 +392,14 @@ The following are out of scope for v1:
 - Archaeal ribosomes (skipped with reason
   `archaeal_ribosome_not_supported`).
 - Ribosomal fragments and partial assemblies missing either the SSU
-  or the LSU.
+  or the LSU (skipped with `partial_ribosome_missing_ssu_or_lsu`).
+- Asymmetric assemblies with split rRNA (e.g. Tetrahymena /
+  Chlamydomonas chloroplast / human mitoribosome where the 28S or 23S
+  is biologically cleaved into multiple chains: 1 SSU chain + 2-3 LSU
+  fragments). Skipped with `fragmented_ribosome_not_supported` because
+  the canonical anchor residue numbers don't transfer onto fragmented
+  chains. Multi-ribosome bundles (matched SSU/LSU chain counts) are
+  *not* affected and are split into per-ribosome annotations instead.
 - Entries solved by NMR.
 - tRNA state labels beyond the current contact-based scheme.
 
