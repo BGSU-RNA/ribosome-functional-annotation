@@ -556,13 +556,14 @@ def test_bgsu_cache_key_includes_depth() -> None:
     ("classification", "expected_pdb"),
     [
         ("bacterial_ribosome", "5J7L"),
-        ("eukaryotic_organellar_ribosome", "5J7L"),  # §6.4: organellar → E. coli
+        ("eukaryotic_organellar_ribosome", "5J7L"),  # filtered E. coli anchors
         ("eukaryotic_ribosome", "7ZW0"),
     ],
 )
 def test_reference_selection(classification: str, expected_pdb: str) -> None:
     refs = api._select_reference_units(classification)
     # Every reference unit ID should start with the expected reference PDB.
+    # (Sites may be empty for organellar — ssu_etrna has no mt-friendly anchor.)
     for site_units in refs.values():
         for unit_id in site_units:
             assert unit_id.startswith(f"{expected_pdb}|"), (

@@ -158,8 +158,20 @@ def assign_functional_chains(
     # spuriously win the closest-distance race for the mRNA slot. Exclude
     # known-tRNA chains from the mRNA candidate pool only; they're still
     # eligible for A-tRNA / P-tRNA / E-tRNA assignment below.
+    #
+    # Some mitoribosome deposits annotate the A-tRNA chain without an
+    # Rfam tag (e.g. 7QI5 chain Aw has empty ``rfam_accessions`` despite
+    # description "A/A-tRNA"). To cover those, treat any candidate whose
+    # description contains the substring "tRNA" / "trna" as tRNA-like
+    # and exclude it from the mRNA pool too. mRNA chains never carry
+    # this substring; the worst-case false-positive (an mRNA labelled
+    # "tRNA-binding-site mimic") is acceptable because mRNA assignment
+    # would then simply skip and the chain falls into other_rna_chains.
     trna_rfam_ifes = {c.ife for c in by_role.get("trna", [])}
-    mrna_candidates = [c for c in candidate_pool if c.ife not in trna_rfam_ifes]
+    mrna_candidates = [
+        c for c in candidate_pool
+        if c.ife not in trna_rfam_ifes and not _looks_like_trna(c)
+    ]
     mrna_chain = _pick_chain_by_min_distance(
         structure,
         mrna_candidates,
@@ -206,31 +218,69 @@ def assign_functional_chains(
 
     # 5. LSU-based fallback for unfilled A and P slots.
     #
-    # Synthetic tRNA analogs (acceptor-end-only fragments in 7RQA, 8T8C)
-    # and real pre-accommodation tRNAs (3JAG, 7O7Z, 7OSM, 7UG7) contact
-    # the PTC tightly but are far from the SSU decoding centre, so the
-    # SSU-based pass above misses them. After the canonical pass fills
-    # what it can, fall back to assignment by min-distance to lsu_atrna
-    # (for unfilled A) and lsu_ptrna (for unfilled P). E-tRNA already
-    # uses LSU anchors so no fallback is needed for that slot.
-    if aminoacyl_chain is None:
-        aminoacyl_chain = _pick_chain_by_min_distance(
-            structure,
-            candidate_pool,
-            site_targets[LSU_ATRNA],
-            cutoff=cutoff,
+    # Synthetic tRNA analogs (acceptor-end-only fragments in 7RQA, 8T8C),
+    # real pre-accommodation tRNAs (3JAG, 7O7Z, 7OSM, 7UG7), and
+    # mitoribosome P-tRNAs (where the SSU decoding centre anchors don't
+    # map cleanly) contact the PTC tightly but are far from the SSU
+    # anchors. After the canonical pass fills what it can, fall back to
+    # assigning each remaining candidate to whichever LSU site
+    # (lsu_atrna or lsu_ptrna) it is **closer** to — not just to A
+    # first.
+    #
+    # The closer-site choice is essential for mitoribosomal P-tRNAs
+    # which incidentally contact both PTC anchor clusters: with strict
+    # A-before-P ordering 8OIR's P-Met-tRNA wins the A slot before
+    # P-fallback runs, even though it's closer to the P anchors. The
+    # closer-site choice picks the correct site without changing the
+    # canonical-SSU happy path (where A-tRNA is picked via ssu_atrna
+    # before the fallback fires at all).
+    if aminoacyl_chain is None or peptidyl_chain is None:
+        lsu_a_distances = _compute_chain_distances(
+            structure, candidate_pool, site_targets[LSU_ATRNA], cutoff=cutoff
         )
-        if aminoacyl_chain is not None:
-            candidate_pool = _without(candidate_pool, aminoacyl_chain)
-    if peptidyl_chain is None:
-        peptidyl_chain = _pick_chain_by_min_distance(
-            structure,
-            candidate_pool,
-            site_targets[LSU_PTRNA],
-            cutoff=cutoff,
+        lsu_p_distances = _compute_chain_distances(
+            structure, candidate_pool, site_targets[LSU_PTRNA], cutoff=cutoff
         )
-        if peptidyl_chain is not None:
-            candidate_pool = _without(candidate_pool, peptidyl_chain)
+        # Build (chain, d_a, d_p) tuples for candidates contacting either site.
+        triples: list[tuple[ChainRef, float | None, float | None]] = []
+        for chain in candidate_pool:
+            da = lsu_a_distances.get(chain.auth_asym_id)
+            dp = lsu_p_distances.get(chain.auth_asym_id)
+            if da is None and dp is None:
+                continue
+            triples.append((chain, da, dp))
+
+        # Best-first ordering: candidates with the smallest LSU-side
+        # contact get assigned first. Ties go to A.
+        def _best_distance(t: tuple[ChainRef, float | None, float | None]) -> float:
+            distances = [d for d in (t[1], t[2]) if d is not None]
+            return min(distances) if distances else float("inf")
+
+        triples.sort(key=_best_distance)
+
+        for chain, da, dp in triples:
+            if aminoacyl_chain is not None and peptidyl_chain is not None:
+                break
+            # Preferred site = the LSU anchor cluster this chain sits
+            # closer to. Ties (or single-site contact) collapse to that
+            # single site. If the preferred site is already filled, fall
+            # back to the other site (only if this chain also makes a
+            # ≤cutoff contact there).
+            if da is not None and (dp is None or da <= dp):
+                preferred: tuple[str, float | None] = ("A", da)
+                alternative: tuple[str, float | None] = ("P", dp)
+            else:
+                preferred = ("P", dp)
+                alternative = ("A", da)
+            for site, _d in (preferred, alternative):
+                if site == "A" and aminoacyl_chain is None:
+                    aminoacyl_chain = chain
+                    candidate_pool = _without(candidate_pool, chain)
+                    break
+                if site == "P" and peptidyl_chain is None:
+                    peptidyl_chain = chain
+                    candidate_pool = _without(candidate_pool, chain)
+                    break
 
     return ChainAssignments(
         mrna_chain=mrna_chain,
@@ -274,6 +324,40 @@ def _without(pool: list[ChainRef], to_remove: ChainRef) -> list[ChainRef]:
     """Return ``pool`` minus ``to_remove`` (compared by IFE — the canonical
     chain identity used throughout the package)."""
     return [c for c in pool if c.ife != to_remove.ife]
+
+
+def _compute_chain_distances(
+    structure: gemmi.Structure,
+    candidates: list[ChainRef],
+    target_residues_by_chain: dict[str, list[gemmi.Residue]],
+    *,
+    cutoff: float,
+) -> dict[str, float]:
+    """Return ``{auth_asym_id: min_distance}`` for each candidate that has at
+    least one atom within ``cutoff`` of any anchor residue. Same neighbour
+    search as :func:`_pick_chain_by_min_distance`, just returning the whole
+    distance map rather than the winner."""
+    if not candidates or not target_residues_by_chain:
+        return {}
+    by_auth = {c.auth_asym_id: c for c in candidates}
+    return find_neighbouring_chains(
+        structure,
+        target_residues_by_chain,
+        cutoff=cutoff,
+        candidate_chains=by_auth.keys(),
+    )
+
+
+def _looks_like_trna(chain: ChainRef) -> bool:
+    """Description-based tRNA detection for the mRNA-pool exclusion.
+
+    Catches tRNAs that lack the Rfam ``RF00005`` tag but whose deposit
+    description still says "tRNA" (e.g. mitoribosome A-tRNAs in 7QI5
+    chain Aw, or peptidyl-tRNA analogs in 7RQA / 8T8C). Case-insensitive
+    substring match on ``description``.
+    """
+    desc = chain.description or ""
+    return "trna" in desc.lower()
 
 
 def _lookup_target_residues(
@@ -353,7 +437,12 @@ def compute_trna_states(
         cutoff=cutoff,
         evidence=evidence,
     )
-    exit_state: str | None = "E/E" if assignments.exit_trna_chain is not None else None
+    exit_state = _compute_etrna_state(
+        structure,
+        assignments.exit_trna_chain,
+        site_targets,
+        cutoff=cutoff,
+    )
 
     return TRNAStates(
         aminoacyl_trna_state=aminoacyl_state,
@@ -471,6 +560,37 @@ def _compute_ptrna_state(
         evidence=evidence,
     )
     return f"{ssu_state}/{lsu_state}"
+
+
+def _compute_etrna_state(
+    structure: gemmi.Structure,
+    etrna_chain: ChainRef | None,
+    site_targets: Mapping[str, dict[str, list[gemmi.Residue]]],
+    *,
+    cutoff: float,
+) -> str | None:
+    """Implement the §12.3 E-tRNA state rules.
+
+    Canonical full-length E-tRNA produces ``E/E``. A chain that doesn't
+    contact the SSU exit-site anchor (``ssu_etrna``) gets ``*/E`` if
+    full-length, ``**/E`` if shorter than
+    :data:`ASL_FRAGMENT_MAX_LENGTH`. The LSU side is always ``E`` here
+    because the chain was assigned to E via the ``lsu_etrna`` anchor in
+    the first place.
+    """
+    if etrna_chain is None:
+        return None
+    chain_name = etrna_chain.auth_asym_id
+
+    contacts_ssu_etrna = _chain_contacts_site(
+        structure, chain_name, site_targets[SSU_ETRNA], cutoff=cutoff
+    )
+    if contacts_ssu_etrna:
+        ssu_state = "E"
+    else:
+        chain_length = _get_chain_length(structure, chain_name)
+        ssu_state = "**" if chain_length < ASL_FRAGMENT_MAX_LENGTH else "*"
+    return f"{ssu_state}/E"
 
 
 def _resolve_lsu_state(

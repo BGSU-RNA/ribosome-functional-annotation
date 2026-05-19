@@ -465,8 +465,6 @@ def _annotate_one_assembly(
                 subunit,
                 exc,
             )
-            # Mirror per-site warning shape so consumers don't have to
-            # know about the batched implementation detail.
             for site_key in subunit_groups:
                 warnings.append(f"correspondence_fetch_failed_for_{site_key}")
             continue
@@ -742,6 +740,7 @@ def _annotate_multi_ribosome_bundle(
     return annotations
 
 
+_FRAGMENT_PREFIX = "**/"
 _NO_CONTACT_FRAGMENT_STATE = "**/**"
 
 
@@ -749,21 +748,31 @@ def _demote_no_contact_fragments(
     assignments: ChainAssignments,
     states: TRNAStates,
 ) -> tuple[ChainAssignments, TRNAStates]:
-    """Clear A or P chain assignments whose state is ``**/**``.
+    """Clear chain assignments whose state begins with ``**/``.
 
-    A state of ``**/**`` means the chain is shorter than
-    :data:`constants.ASL_FRAGMENT_MAX_LENGTH` and makes no anchor contact
-    on either subunit. Such a chain shouldn't be claiming a tRNA role —
-    let it fall through to ``unmapped_rna_chains`` instead.
+    A SSU half-state of ``**`` means the chain is shorter than
+    :data:`constants.ASL_FRAGMENT_MAX_LENGTH` and didn't contact any
+    SSU anchor. For E-tRNA in particular this catches CCA-tripeptide
+    fragments (like 7A5G chain u3, a 3-mer ``R(P*CP*A)``) that happen
+    to be close to the LSU exit-site anchor — they shouldn't be claiming
+    a tRNA role at all. Same logic for A and P chains whose state ended
+    up ``**/**`` (no anchor contact on either subunit). Let demoted
+    chains fall through to ``unmapped_rna_chains`` instead.
     """
     chain_updates: dict[str, Any] = {}
     state_updates: dict[str, Any] = {}
-    if states.aminoacyl_trna_state == _NO_CONTACT_FRAGMENT_STATE:
+    a_state = states.aminoacyl_trna_state or ""
+    p_state = states.peptidyl_trna_state or ""
+    e_state = states.exit_trna_state or ""
+    if a_state.startswith(_FRAGMENT_PREFIX) and a_state == _NO_CONTACT_FRAGMENT_STATE:
         chain_updates["aminoacyl_trna_chain"] = None
         state_updates["aminoacyl_trna_state"] = None
-    if states.peptidyl_trna_state == _NO_CONTACT_FRAGMENT_STATE:
+    if p_state.startswith(_FRAGMENT_PREFIX) and p_state == _NO_CONTACT_FRAGMENT_STATE:
         chain_updates["peptidyl_trna_chain"] = None
         state_updates["peptidyl_trna_state"] = None
+    if e_state.startswith(_FRAGMENT_PREFIX):
+        chain_updates["exit_trna_chain"] = None
+        state_updates["exit_trna_state"] = None
     if chain_updates:
         assignments = assignments.model_copy(update=chain_updates)
     if state_updates:
@@ -1356,9 +1365,14 @@ def _select_reference_units(
     if classification == "bacterial_ribosome":
         return C.ECOLI_REFERENCE_UNITS
     if classification == "eukaryotic_organellar_ribosome":
-        # Spec §6.4: organellar rRNA cores are bacterial-like, so we use the
-        # E. coli reference set for v1.
-        return C.ECOLI_REFERENCE_UNITS
+        # Organellar rRNA cores are bacterial-like, so we reuse the E.
+        # coli reference — but with the four mt-incompatible anchors
+        # removed (see :data:`constants.ECOLI_REFERENCE_UNITS_ORGANELLAR`
+        # for the rationale). BGSU's structural-alignment correspondence
+        # cross-walks the remaining 16 anchors onto mt-12S / mt-16S
+        # residues directly, regardless of the target deposit's
+        # numbering scheme.
+        return C.ECOLI_REFERENCE_UNITS_ORGANELLAR
     if classification == "eukaryotic_ribosome":
         return C.YEAST_REFERENCE_UNITS
     # Shouldn't reach here: the only callers feed in non-None

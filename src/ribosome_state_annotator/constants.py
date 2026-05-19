@@ -193,6 +193,60 @@ All anchor positions and residue identities verified against the live
 7ZW0 mmCIF. Same S. cerevisiae residue numbering as 5TBW so the
 positions match the spec values one-to-one."""
 
+ECOLI_REFERENCE_UNITS_ORGANELLAR: Final[Mapping[str, tuple[str, ...]]] = {
+    "ssu_mrna": (
+        "5J7L|1|AA|G|926",
+        "5J7L|1|AA|4OC|1402",
+        "5J7L|1|AA|C|1403",
+    ),
+    "ssu_ptrna": (
+        "5J7L|1|AA|G|1338",
+        "5J7L|1|AA|A|1339",
+        "5J7L|1|AA|C|1400",
+    ),
+    "ssu_atrna": (
+        "5J7L|1|AA|G|530",
+        "5J7L|1|AA|A|1492",
+        "5J7L|1|AA|A|1493",
+    ),
+    "ssu_etrna": (),
+    "lsu_atrna": (
+        "5J7L|1|DA|G|2553",
+        "5J7L|1|DA|G|2583",
+        "5J7L|1|DA|U|2585",
+    ),
+    "lsu_ptrna": (
+        "5J7L|1|DA|OMG|2251",
+        "5J7L|1|DA|G|2252",
+        "5J7L|1|DA|G|2253",
+    ),
+    "lsu_etrna": (
+        "5J7L|1|DA|C|2422",
+    ),
+}
+"""E. coli reference anchors filtered for mitoribosome cross-Rfam mapping.
+
+Identical to :data:`ECOLI_REFERENCE_UNITS` minus four anchors that BGSU
+cannot cross-walk to mt-rRNA:
+
+  - ``ssu_etrna``: ``G|693`` + ``A|694`` (only 2/13 mt deposits map)
+  - ``lsu_etrna``: ``G|2112`` (0/13) + ``G|2421`` (only 2/13)
+
+These E. coli residues fall in helices that mitoribosomal rRNA either
+lacks entirely or has diverged from past the point of structural
+homology. Including them in a batched BGSU query triggers the
+intersection semantic and silently drops every mt deposit from the
+response. With the four anchors removed, the remaining 16 anchors all
+cross-walk cleanly to all ~13 known human / Toxoplasma mitoribosome
+deposits via BGSU's structural alignment.
+
+The ``ssu_etrna`` site is empty for organellar — we lose the SSU P/E
+hybrid-state distinction (the ``pe/...`` half-state), but E-tRNA
+*assignment* uses LSU_ETRNA only, so it remains intact via ``C|2422``.
+
+Routed by :func:`api._select_reference_units` whenever the
+classification is ``"eukaryotic_organellar_ribosome"``."""
+
 # ---------------------------------------------------------------------------
 # Classification (spec §8)
 # ---------------------------------------------------------------------------
