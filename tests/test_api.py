@@ -23,8 +23,8 @@ from ribosome_state_annotator import constants as C
 from ribosome_state_annotator.bgsu_client import BGSU_CORRESPONDENCE_URL
 from ribosome_state_annotator.cache import Cache
 from ribosome_state_annotator.coordinates import RCSB_ASSEMBLY_DOWNLOAD_TEMPLATE
-from ribosome_state_annotator.pdbe_client import PDBE_RFAM_URL_TEMPLATE
 from ribosome_state_annotator.rcsb_client import RCSB_GRAPHQL_URL
+from ribosome_state_annotator.rfam_pdb_region import RFAM_PDB_REGION_URL
 
 FIXTURE_PDB_ID = "RIBOFIXTURE"
 
@@ -162,10 +162,17 @@ def _install_mocks(
     pdb_id: str = FIXTURE_PDB_ID,
     assembly_id: str = "1",
 ) -> dict[str, respx.Route]:
-    """Install all four respx routes and return them by name."""
+    """Install all respx routes and return them by name.
+
+    The ``pdbe_payload`` argument is preserved for backward compatibility
+    with older test signatures but is unused — the package no longer
+    queries PDBe's REST endpoint for Rfam annotations (it uses the EBI
+    pdb_full_region file instead, mocked here as unavailable so tests
+    don't try to fetch it).
+    """
+    del pdbe_payload  # historical compatibility, no longer used
     entry = entry_payload if entry_payload is not None else _bacterial_entry_payload()
     bgsu = bgsu_payload if bgsu_payload is not None else _combined_bgsu_alignment(_ANCHOR_BY_SITE)
-    pdbe = pdbe_payload if pdbe_payload is not None else _pdbe_payload(pdb_id)
     cif = cif_bytes if cif_bytes is not None else b""
 
     rcsb_route = respx.post(RCSB_GRAPHQL_URL).mock(
@@ -174,17 +181,21 @@ def _install_mocks(
     bgsu_route = respx.get(BGSU_CORRESPONDENCE_URL).mock(
         return_value=httpx.Response(200, json=bgsu)
     )
-    pdbe_url = PDBE_RFAM_URL_TEMPLATE.format(pdb_id=pdb_id.lower())
-    pdbe_route = respx.get(pdbe_url).mock(return_value=httpx.Response(200, json=pdbe))
     download_url = RCSB_ASSEMBLY_DOWNLOAD_TEMPLATE.format(
         pdb_id=pdb_id.lower(), assembly_id=assembly_id
     )
     coord_route = respx.get(download_url).mock(return_value=httpx.Response(200, content=cif))
+    # Mock the EBI Rfam pdb_full_region URL as a 404 — tests don't
+    # exercise the Rfam-file augmentation path; RCSB-supplied Rfam tags
+    # on the entry payload are sufficient for classification.
+    rfam_route = respx.route(url=RFAM_PDB_REGION_URL).mock(
+        return_value=httpx.Response(404)
+    )
     return {
         "rcsb": rcsb_route,
         "bgsu": bgsu_route,
-        "pdbe": pdbe_route,
         "coord": coord_route,
+        "rfam": rfam_route,
     }
 
 
@@ -462,14 +473,12 @@ def test_rcsb_cache_avoids_second_http_call(
     # 1 call for the three LSU sites concatenated.
     assert routes["bgsu"].call_count == 2
     assert routes["coord"].call_count == 1
-    assert routes["pdbe"].call_count == 1
 
     api.annotate_pdb(FIXTURE_PDB_ID, cache=cache)
-    # All four caches should hit on the second call — no new HTTP traffic.
+    # All caches should hit on the second call — no new HTTP traffic.
     assert routes["rcsb"].call_count == 1
     assert routes["bgsu"].call_count == 2
     assert routes["coord"].call_count == 1
-    assert routes["pdbe"].call_count == 1
 
 
 def test_resolve_cache_no_cache_returns_none() -> None:

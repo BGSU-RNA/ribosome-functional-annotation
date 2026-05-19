@@ -248,7 +248,7 @@ RRNA_CORE_EUKARYOTIC = "eukaryotic_like"
 RRNA_CORE_MIXED = "mixed"
 RRNA_CORE_AMBIGUOUS = "ambiguous"
 
-WARNING_MIXED_RRNA_CORE = "mixed_rrna_core_resolved_via_protein_vote"
+WARNING_MIXED_RRNA_CORE = "mixed_rrna_core_treated_as_bacterial_like"
 
 
 # Archaeal Rfam accessions (added to RFAM_ROLE_MAP so SSU/LSU detection
@@ -521,23 +521,17 @@ def classify_assembly(
             warnings=warnings,
         )
 
-    # 5b. Resolve MIXED rRNA core using the protein-vote dominant superkingdom.
-    #
-    # PDBe's HMM-based Rfam mapping sometimes annotates an rRNA chain with
-    # multiple cross-family hits (e.g. 9B0S' eukaryotic 18S chain tagged
-    # with RF00177 + RF01959 + RF01960 simultaneously). When this happens
-    # for both SSU and LSU we get MIXED here. Picking BACTERIAL by default
-    # mis-routes eukaryotic cytoplasmic ribosomes to the organellar branch
-    # (9B0S → eukaryotic_organellar_ribosome instead of eukaryotic_ribosome).
-    # Use the protein vote — it doesn't suffer from this over-annotation —
-    # to pick the resolved flavour. True biological chimeras are vanishingly
-    # rare; the warning still surfaces so consumers see this was MIXED.
+    # 5b. Defensive MIXED demotion. Reachable only from synthetic /
+    # hand-crafted ChainRefs in tests — the production Rfam source
+    # (single-best-bit-score per chain, via the EBI pdb_full_region
+    # file; see §31 / §32) yields at most one Rfam accession per chain,
+    # which makes determine_rrna_core() unable to detect a MIXED state
+    # from real data. Kept as a belt-and-braces fallback so the v3.0
+    # behaviour is preserved if a caller bypasses the file-driven
+    # augmentation and supplies multi-tag ChainRefs directly.
     if rrna_core == RRNA_CORE_MIXED:
         warnings.append(WARNING_MIXED_RRNA_CORE)
-        rrna_core = (
-            RRNA_CORE_EUKARYOTIC if dominant_sk == "Eukaryota" else RRNA_CORE_BACTERIAL
-        )
-        evidence["rrna_core_resolved"] = rrna_core
+        rrna_core = RRNA_CORE_BACTERIAL
 
     # 6. Primary classification truth table
     classification = _classification_rule(rrna_core, dominant_sk)

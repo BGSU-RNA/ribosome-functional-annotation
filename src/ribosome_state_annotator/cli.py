@@ -35,6 +35,13 @@ from ribosome_state_annotator.raddb import (
     list_raddb_files,
     load_raddb_metadata,
 )
+from ribosome_state_annotator.rfam_pdb_region import (
+    ensure_rfam_pdb_region_available,
+    get_local_rfam_file_path,
+    get_local_rfam_metadata_path,
+    list_rfam_files,
+    load_rfam_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,12 @@ cache_app = typer.Typer(
 )
 app.add_typer(cache_app, name="cache")
 
+rfam_app = typer.Typer(
+    name="rfam",
+    help="Inspect or refresh the cached EBI Rfam pdb_full_region file.",
+    no_args_is_help=True,
+)
+
 raddb_app = typer.Typer(
     name="raddb",
     help="Inspect or refresh the cached RADdb large-scale-movement table.",
@@ -61,6 +74,7 @@ raddb_app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(raddb_app, name="raddb")
+app.add_typer(rfam_app, name="rfam")
 
 stdout_console = Console()
 
@@ -364,6 +378,13 @@ def annotate(
             help="Force an online check for a newer RADdb release (default: refresh weekly).",
         ),
     ] = False,
+    refresh_rfam: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-rfam",
+            help="Force an online check for a newer Rfam pdb_full_region file (default: refresh weekly).",
+        ),
+    ] = False,
     quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
@@ -381,6 +402,7 @@ def annotate(
         coordinate_source=coordinate_source,
         local_coordinate_path=local_path,
         refresh_raddb=refresh_raddb,
+        refresh_rfam=refresh_rfam,
     )
     _emit_annotations(
         annotations,
@@ -460,6 +482,13 @@ def annotate_batch(
             help="Force an online check for a newer RADdb release (default: refresh weekly).",
         ),
     ] = False,
+    refresh_rfam: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-rfam",
+            help="Force an online check for a newer Rfam pdb_full_region file (default: refresh weekly).",
+        ),
+    ] = False,
     quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
@@ -478,6 +507,7 @@ def annotate_batch(
         no_cache=no_cache,
         strict_complete_check=strict,
         refresh_raddb=refresh_raddb,
+        refresh_rfam=refresh_rfam,
     )
     _emit_annotations(
         annotations,
@@ -508,7 +538,9 @@ def cache_info(
     table.add_column("Namespace")
     table.add_column("Entries", justify="right")
     raddb_files = list_raddb_files(cache.root)
-    if not info.exists and raddb_files == 0:
+    rfam_bytes = list_rfam_files(cache.root)
+    rfam_count = 1 if rfam_bytes > 0 else 0
+    if not info.exists and raddb_files == 0 and rfam_count == 0:
         table.add_row("status", "[yellow]missing[/yellow]")
     else:
         table.add_row("rcsb", str(info.rcsb_entries))
@@ -518,9 +550,10 @@ def cache_info(
         table.add_row("fr3d", str(info.fr3d_entries))
         table.add_row("ccd", str(info.ccd_entries))
         table.add_row("raddb", str(raddb_files))
+        table.add_row("rfam", str(rfam_count))
         table.add_row(
             "[bold]total entries",
-            f"[bold]{info.total_entries + raddb_files}[/bold]",
+            f"[bold]{info.total_entries + raddb_files + rfam_count}[/bold]",
         )
         table.add_row("total bytes", f"{info.total_bytes:,}")
     stdout_console.print(table)
@@ -595,6 +628,55 @@ def raddb_refresh(
         _err("[red]RADdb unavailable: download failed and no cached file is present[/red]")
         raise typer.Exit(code=1)
     _err(f"[green]RADdb {metadata.rad_date} ready at {get_local_raddb_csv_path()}[/green]")
+
+
+# ---------------------------------------------------------------------------
+# rfam info / rfam refresh
+# ---------------------------------------------------------------------------
+
+
+@rfam_app.command("info")
+def rfam_info() -> None:
+    """Show the cached Rfam pdb_full_region file location, version, and timestamp."""
+    metadata = load_rfam_metadata()
+    file_path = get_local_rfam_file_path()
+    meta_path = get_local_rfam_metadata_path()
+    table = Table(title="Rfam pdb_full_region cache")
+    table.add_column("Field")
+    table.add_column("Value")
+    if metadata is None:
+        table.add_row("status", "[yellow]not cached[/yellow]")
+        table.add_row("file_path", str(file_path))
+        table.add_row("metadata_path", str(meta_path))
+    else:
+        table.add_row("last_modified", metadata.last_modified or "(none)")
+        table.add_row("downloaded_at", metadata.downloaded_at.replace(microsecond=0).isoformat())
+        table.add_row("source_url", metadata.source_url)
+        table.add_row("file_path", str(file_path))
+        if file_path.is_file():
+            table.add_row("file_bytes", f"{file_path.stat().st_size:,}")
+        else:
+            table.add_row("file_bytes", "[red]missing[/red]")
+    stdout_console.print(table)
+
+
+@rfam_app.command("refresh")
+def rfam_refresh(
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Re-download even if the cache is already at the latest version."),
+    ] = False,
+) -> None:
+    """Check EBI for a newer Rfam pdb_full_region file and download if changed."""
+    _configure_logging(quiet=False, debug=False)
+    metadata = ensure_rfam_pdb_region_available(force_refresh=force)
+    if metadata is None:
+        _err("[red]Rfam pdb_full_region unavailable: download failed and no cached file is present[/red]")
+        raise typer.Exit(code=1)
+    _err(
+        f"[green]Rfam pdb_full_region ready at {get_local_rfam_file_path()} "
+        f"(Last-Modified={metadata.last_modified})[/green]"
+    )
 
 
 # Silence "unused JSONL helper" warnings — render_jsonl is currently

@@ -96,13 +96,15 @@ phylogenetically conserved positions across all of biology. The
 package leverages this conservation through a four-stage pipeline:
 
 1. **Retrieve and classify.** Entry metadata is pulled from the RCSB
-   GraphQL API (augmented with PDBe REST Rfam mappings for rRNA
-   chains) and the assembly is classified as bacterial, eukaryotic
-   cytoplasmic, or eukaryotic organellar. When PDBe over-annotates a
-   chain with multiple cross-family Rfam hits (giving a MIXED rRNA
-   core), the classifier defers the resolution until the dominant
-   protein-superkingdom vote is computed and demotes MIXED to
-   whichever flavour matches the protein vote.
+   GraphQL API, augmented with Rfam mappings from the EBI
+   `pdb_full_region.txt.gz` flat file (locally cached, weekly refresh
+   — see [`Rfam pdb_full_region`](#rfam-pdb_full_region-mapping) below).
+   For each rRNA chain the package picks the **single highest
+   bit-score** Rfam accession from the file; cross-family HMM hits
+   (e.g. bacterial 16S + archaeal SSU + eukaryotic 18S all matching
+   one chain) collapse to the one biologically-correct family. The
+   assembly is then classified as bacterial, eukaryotic cytoplasmic,
+   or eukaryotic organellar.
 2. **Project reference anchors.** Curated functional-site
    nucleotides from a reference ribosome are mapped onto the query
    rRNA via the BGSU RNA correspondence API, which uses Rfam-based
@@ -154,7 +156,7 @@ flowchart TD
 
     %% External data sources
     RCSB[("RCSB<br/>GraphQL")]:::source
-    PDBe[("PDBe REST<br/>nucleic_mappings/rfam")]:::source
+    RfamFile[("EBI Rfam<br/>pdb_full_region.txt.gz<br/>refreshed weekly")]:::source
     BGSU[("BGSU RNA 3D Hub<br/>correspondence")]:::source
     Coords[("RCSB Files<br/>biological-assembly mmCIF")]:::source
     RADdb[("RADdb LSU↔SSU CSV<br/>refreshed weekly")]:::source
@@ -180,7 +182,7 @@ flowchart TD
     %% Flow
     Input --> Fetch
     RCSB --> Fetch
-    PDBe --> Fetch
+    RfamFile --> Fetch
 
     Fetch -->|per biological assembly| Classify
     Classify -->|unsupported| Skip
@@ -407,16 +409,17 @@ The following are out of scope for v1:
 
 All external API responses are cached on disk at
 `~/.cache/ribosome-state-annotator/` (overridable with `--cache-dir`;
-disabled with `--no-cache`). The cache contains seven namespaces:
-`rcsb/`, `bgsu/`, `pdbe/`, `coords/`, `fr3d/`, `ccd/`, and `raddb/`.
-The first six are content-addressed and never expire; to refresh,
-invoke `ribostate cache clear` or delete the cache directory. The
-`ccd/` namespace stores per-component PDB Chemical Component
-Dictionary CIFs, fetched lazily on first encounter with a modified
-nucleotide whose definition is incomplete in Gemmi's built-in
-tabulated dictionary (e.g. `U8U` =
+disabled with `--no-cache`). The cache contains eight namespaces:
+`rcsb/`, `bgsu/`, `pdbe/`, `coords/`, `fr3d/`, `ccd/`, `raddb/`, and
+`rfam/`. The first six are content-addressed per-entry and never
+expire; to refresh, invoke `ribostate cache clear` or delete the cache
+directory. The `ccd/` namespace stores per-component PDB Chemical
+Component Dictionary CIFs, fetched lazily on first encounter with a
+modified nucleotide whose definition is incomplete in Gemmi's
+built-in tabulated dictionary (e.g. `U8U` =
 5-methylaminomethyl-2-thiouridine, a *Thermus* tRNA wobble-position
-modification).
+modification). The `raddb/` and `rfam/` namespaces hold a single
+weekly-refreshed dataset each (see below).
 
 ### RADdb large-scale movements
 
@@ -450,6 +453,30 @@ so the output schema remains stable:
 Only `body rot.` and `head rot.` are exposed in v1. The remaining
 RADdb columns (tilt, translation, directionality) are loaded into
 memory but are not currently surfaced in the JSON output.
+
+### Rfam pdb_full_region mapping
+
+The `rfam/` namespace stores a local copy of EBI's
+[`pdb_full_region.txt.gz`](https://ftp.ebi.ac.uk/pub/databases/Rfam/.preview/pdb_full_region.txt.gz)
+flat file alongside a `metadata.json` sidecar. The file maps every
+PDB chain to its matching Rfam families with cmsearch alignment
+bit-scores; for each `(pdb_id, chain)` the package keeps the **single
+highest-bit-score** Rfam accession, which cleanly disambiguates the
+cross-family HMM hits that PDBe's REST endpoint surfaces (the
+historical source of the MIXED-rRNA-core edge case on entries like
+9B0S, where the same eukaryotic 18S chain was being tagged with
+bacterial 16S + archaeal SSU + eukaryotic 18S simultaneously).
+
+The file is refreshed weekly: at the start of any annotation run, if
+the local copy is more than seven days old, a HEAD request to the EBI
+URL compares the upstream `Last-Modified` value against the cached
+metadata and re-downloads only if it has changed. The check can be
+forced immediately with `ribostate rfam refresh` or with
+`--refresh-rfam` on the `annotate` / `annotate-batch` subcommands.
+The current cached state is reported by `ribostate rfam info`. The
+integration is best-effort: every failure mode (no cache, stale cache
++ offline, malformed file) leaves the rRNA chains with whatever Rfam
+tags RCSB supplied directly.
 
 ### tRNA–mRNA codon/anticodon evidence (FR3D)
 
@@ -518,7 +545,7 @@ implements one stage of the contact-transfer workflow described above.
 | `models.py` | Pydantic v2 data models: `ChainRef`, `LigandRef`, `AssemblyContext`, `CorrespondenceResult`, `RibosomeAnnotation`. All JSON and CSV output is round-tripped through these. |
 | `constants.py` | Curated reference unit IDs (`BACTERIAL_REFERENCE_UNITS` for 5J7L; `YEAST_REFERENCE_UNITS` for 7ZW0) — the functional-site anchors. |
 | `rcsb_client.py` | RCSB GraphQL client and assembly parser. Reads `assemblies → polymer_entity_instances` and produces per-assembly `AssemblyContext` records. |
-| `pdbe_client.py` | PDBe REST Rfam-mappings client. Augments rRNA chains with Rfam accessions no longer supplied by RCSB. |
+| `rfam_pdb_region.py` | Cache + parse the EBI `pdb_full_region.txt.gz` flat file; selects the single best-score Rfam accession per `(pdb_id, chain)`. Replaces the previous PDBe REST per-entry lookup. |
 | `bgsu_client.py` | BGSU correspondence HTTP client and tolerant JSON parser. Handles both the live `mappings` and the idealised `alignment` response shapes. |
 | `correspondence.py` | PDB-prefix and assembly-chain filtering, including the multi-assembly chain-substitution fallback. |
 | `coordinates.py` | mmCIF download and Gemmi parsing. Caches under `coords/`. |

@@ -83,10 +83,6 @@ from ribosome_state_annotator.multiribo import (
     pair_ssu_lsu_by_centroid,
     partition_chains_by_ribosome,
 )
-from ribosome_state_annotator.pdbe_client import (
-    fetch_rfam_mappings,
-    parse_rfam_mappings,
-)
 from ribosome_state_annotator.raddb import (
     RADdbDataset,
     ensure_raddb_available,
@@ -96,6 +92,12 @@ from ribosome_state_annotator.raddb import (
 from ribosome_state_annotator.rcsb_client import (
     fetch_entry_payload,
     parse_assemblies,
+)
+from ribosome_state_annotator.rfam_pdb_region import (
+    RfamPdbRegionDataset,
+    ensure_rfam_pdb_region_available,
+    get_rfam_mapping_for_pdb,
+    load_rfam_pdb_region_dataset,
 )
 from ribosome_state_annotator.trna_mrna import extract_trna_mrna_interactions
 
@@ -127,6 +129,9 @@ def annotate_pdb(
     raddb_dataset: RADdbDataset | None = None,
     refresh_raddb: bool = False,
     no_raddb: bool = False,
+    rfam_dataset: RfamPdbRegionDataset | None = None,
+    refresh_rfam: bool = False,
+    no_rfam: bool = False,
     no_fr3d: bool = False,
 ) -> list[RibosomeAnnotation]:
     """Annotate every biological assembly in one PDB entry.
@@ -157,6 +162,13 @@ def annotate_pdb(
         no_raddb: Skip RADdb integration entirely. The output JSON still
             contains a ``large_scale_movements`` block with ``rad_date=None``
             and null metrics so consumers see a stable schema.
+        rfam_dataset: Pre-loaded Rfam pdb_full_region dataset. When
+            omitted, loaded lazily on first use and reused across
+            assemblies in this call.
+        refresh_rfam: Force an online check for a newer Rfam
+            pdb_full_region file even if the local copy is fresh.
+        no_rfam: Skip the Rfam file augmentation entirely. RCSB-supplied
+            Rfam tags (when present) are still used.
         no_fr3d: Skip the tRNA-mRNA codon/anticodon extraction (no FR3D
             call). The output JSON still contains
             ``trna_mrna_interactions`` as an empty list.
@@ -214,14 +226,24 @@ def annotate_pdb(
             logger.warning("no assembly with id %s in %s", assembly_id, pdb_id_upper)
             return []
 
-    # PDBe Rfam augmentation: RCSB no longer supplies Rfam annotations
-    # for rRNA chains, so we cross-reference PDBe's
-    # `/nucleic_mappings/rfam` endpoint and merge into each ChainRef
-    # before classification runs.
-    rfam_by_chain = _get_or_fetch_rfam_mappings(pdb_id_upper, resolved_cache, client)
+    # Rfam augmentation: RCSB no longer supplies Rfam annotations for
+    # rRNA chains. We pull single-best-score Rfam tags from the EBI
+    # ``pdb_full_region.txt.gz`` flat file (locally cached, weekly
+    # refresh), which selects one Rfam per chain by highest bit-score
+    # and eliminates the multi-family over-annotation noise PDBe's REST
+    # endpoint surfaces (the source of the historical MIXED rrna_core
+    # edge case on entries like 9B0S).
+    if no_rfam:
+        resolved_rfam: RfamPdbRegionDataset | None = None
+    elif rfam_dataset is not None:
+        resolved_rfam = rfam_dataset
+    else:
+        resolved_rfam = _load_rfam_safely(client=client, force_refresh=refresh_rfam)
+
+    rfam_by_chain = get_rfam_mapping_for_pdb(resolved_rfam, pdb_id_upper)
     if rfam_by_chain:
         for assembly in assemblies:
-            _augment_chain_rfam(assembly.rna_chains, rfam_by_chain)
+            _apply_rfam_pdb_region(assembly.rna_chains, rfam_by_chain)
 
     if no_raddb:
         resolved_raddb: RADdbDataset | None = None
@@ -287,6 +309,9 @@ def annotate_many(
     refresh_raddb: bool = False,
     raddb_dataset: RADdbDataset | None = None,
     no_raddb: bool = False,
+    refresh_rfam: bool = False,
+    rfam_dataset: RfamPdbRegionDataset | None = None,
+    no_rfam: bool = False,
     no_fr3d: bool = False,
     client: httpx.Client | None = None,
     **kwargs: Any,
@@ -298,10 +323,11 @@ def annotate_many(
     than propagating. Pass ``continue_on_error=False`` to abort the
     batch on the first error instead.
 
-    ``refresh_raddb`` is honoured once at the start of the batch; the
-    resulting dataset (or the explicit ``raddb_dataset`` if supplied) is
-    threaded through every per-entry call so RADdb is loaded at most
-    once per batch.
+    ``refresh_raddb`` and ``refresh_rfam`` are honoured once at the
+    start of the batch; the resulting datasets (or the explicit
+    ``raddb_dataset`` / ``rfam_dataset`` if supplied) are threaded
+    through every per-entry call so each is loaded at most once per
+    batch.
     """
     aggregated: list[RibosomeAnnotation] = []
     pdb_ids_list = list(pdb_ids)
@@ -312,6 +338,14 @@ def annotate_many(
         resolved_raddb = raddb_dataset
     else:
         resolved_raddb = _load_raddb_safely(client=client, force_refresh=refresh_raddb)
+
+    if no_rfam:
+        resolved_rfam: RfamPdbRegionDataset | None = None
+    elif rfam_dataset is not None:
+        resolved_rfam = rfam_dataset
+    else:
+        resolved_rfam = _load_rfam_safely(client=client, force_refresh=refresh_rfam)
+
     for index, pdb_id in enumerate(pdb_ids_list, start=1):
         logger.info("[batch %d/%d] %s", index, total, pdb_id.upper())
         try:
@@ -321,6 +355,8 @@ def annotate_many(
                     client=client,
                     raddb_dataset=resolved_raddb,
                     no_raddb=no_raddb,
+                    rfam_dataset=resolved_rfam,
+                    no_rfam=no_rfam,
                     no_fr3d=no_fr3d,
                     **kwargs,
                 )
@@ -987,6 +1023,50 @@ def _load_raddb_safely(
         return None
 
 
+def _load_rfam_safely(
+    *, client: httpx.Client | None, force_refresh: bool
+) -> RfamPdbRegionDataset | None:
+    """Best-effort Rfam pdb_full_region load. Returns ``None`` on any failure.
+
+    When this returns ``None``, the pipeline falls back to whatever Rfam
+    tags RCSB supplies directly on the entry (which is typically nothing
+    for rRNA chains, but the path still runs without error).
+    """
+    try:
+        metadata = ensure_rfam_pdb_region_available(
+            client=client, force_refresh=force_refresh
+        )
+    except Exception as exc:
+        logger.warning("Rfam pdb_full_region refresh check failed: %s", exc)
+        return None
+    if metadata is None:
+        return None
+    try:
+        return load_rfam_pdb_region_dataset(metadata=metadata)
+    except Exception as exc:
+        logger.warning("Rfam pdb_full_region dataset load failed: %s", exc)
+        return None
+
+
+def _apply_rfam_pdb_region(
+    chains: list[ChainRef], rfam_by_chain: dict[str, list[str]]
+) -> None:
+    """Replace each chain's ``rfam_accessions`` with the single best-score
+    Rfam from the EBI ``pdb_full_region`` file (when present).
+
+    Chains with no entry in the file keep their existing
+    ``rfam_accessions`` (which may be empty or RCSB-supplied). The file
+    is authoritative when it has a hit — single-best-score selection
+    eliminates the multi-family over-annotation pattern (RF00177 +
+    RF01959 + RF01960 on the same chain) that PDBe's REST endpoint
+    surfaces.
+    """
+    for chain in chains:
+        file_rfam = rfam_by_chain.get(chain.auth_asym_id)
+        if file_rfam:
+            chain.rfam_accessions = list(file_rfam)
+
+
 def _build_large_scale_movements(
     *,
     pdb_id: str,
@@ -1089,62 +1169,6 @@ def _build_chain_substitution(
     if lsu_ref_chain is not None and len(lsu_main) == 1:
         substitution[lsu_ref_chain] = lsu_main[0].auth_asym_id
     return substitution
-
-
-def _augment_chain_rfam(chains: list[ChainRef], rfam_by_chain: dict[str, list[str]]) -> None:
-    """Merge PDBe-supplied Rfam accessions into each chain's
-    :attr:`ChainRef.rfam_accessions` list, preserving any RCSB-supplied
-    accessions already present."""
-    for chain in chains:
-        for accession in rfam_by_chain.get(chain.auth_asym_id, []):
-            if accession not in chain.rfam_accessions:
-                chain.rfam_accessions.append(accession)
-
-
-def _get_or_fetch_rfam_mappings(
-    pdb_id: str, cache: Cache | None, client: httpx.Client | None
-) -> dict[str, list[str]]:
-    """PDBe Rfam fetch with cache wrap.
-
-    Returns an empty dict on any failure (logs a warning) rather than
-    propagating — Rfam augmentation is best-effort; classification will
-    simply skip assemblies that end up with no detectable rRNA.
-    """
-    if cache is not None:
-        cached = cache.get_pdbe_payload(pdb_id)
-        if cached is not None:
-            logger.debug("pdbe cache hit for %s", pdb_id)
-            return parse_rfam_mappings(cached, pdb_id=pdb_id)
-    logger.info("fetching PDBe Rfam mappings for %s", pdb_id)
-    try:
-        result = fetch_rfam_mappings(pdb_id, client=client)
-    except ApiRequestError as exc:
-        logger.warning("PDBe Rfam fetch failed for %s: %s", pdb_id, exc)
-        return {}
-    if cache is not None:
-        # Persist the parsed-but-still-canonical form so a cache hit on
-        # the next call returns the same result without re-parsing the
-        # raw PDBe response.
-        cache.put_pdbe_payload(
-            pdb_id,
-            {pdb_id.lower(): {"Rfam": _rebuild_rfam_block(result)}},
-        )
-    return result
-
-
-def _rebuild_rfam_block(mapping: dict[str, list[str]]) -> dict[str, Any]:
-    """Build a minimal PDBe-shaped Rfam block from a chain → accessions map.
-
-    Symmetric with :func:`pdbe_client.parse_rfam_mappings` so a
-    round-trip through the cache is lossless for the only field we
-    actually use (chain → Rfam-accession).
-    """
-    out: dict[str, Any] = {}
-    for chain_id, accessions in mapping.items():
-        for accession in accessions:
-            block = out.setdefault(accession, {"mappings": []})
-            block["mappings"].append({"chain_id": chain_id})
-    return out
 
 
 def _get_or_fetch_entry(

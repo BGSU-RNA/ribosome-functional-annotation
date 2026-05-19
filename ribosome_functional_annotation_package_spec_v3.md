@@ -559,48 +559,53 @@ nucleotide in the assembly is sufficient for that site's contact
 search; if zero of a site's reference units map, skip just that site
 (do not skip the whole assembly).
 
-### 5.3 PDBe REST API — rRNA Rfam fallback (v3.1)
+### 5.3 EBI Rfam ``pdb_full_region`` flat file — rRNA Rfam source (v3.2)
+
+> **Replaces the v3.1 PDBe REST endpoint.** The v3.1 spec used PDBe's
+> per-entry `/nucleic_mappings/rfam/<pdb_id>` REST endpoint as the
+> Rfam-by-chain source. v3.2 replaces it with a single weekly-refreshed
+> flat file from EBI (see §32) that delivers better data with one
+> background download instead of an HTTP call per assembly. The
+> `pdbe_client.py` module and the `pdbe/` cache namespace are
+> deprecated — kept on disk only for backward compatibility with old
+> caches.
 
 The live RCSB GraphQL schema returns no `Rfam` annotation entries for
 rRNA polymer entities (it still returns Rfam for small ncRNAs such as
 tRNA / SRP RNA). The package therefore augments its Rfam-by-chain map
-with a call to PDBe's REST endpoint:
+with values pulled from EBI's
 
 ```text
-GET https://www.ebi.ac.uk/pdbe/api/v2/nucleic_mappings/rfam/<pdb_id>
+https://ftp.ebi.ac.uk/pub/databases/Rfam/.preview/pdb_full_region.txt.gz
 ```
 
-Response shape:
+This is a single tab-separated file (~200 KB compressed, ~28 k rows,
+~4400 distinct PDBs) listing every PDB chain's Rfam hits with cmsearch
+alignment bit-scores. The package caches it under `~/.cache/
+ribosome-state-annotator/rfam/` and refreshes it weekly via the
+upstream `Last-Modified` header.
 
-```json
-{
-  "5j7l": {
-    "Rfam": {
-      "RF00177": {
-        "identifier": "Bacterial small subunit ribosomal RNA",
-        "mappings": [
-          {"entity_id": 1, "chain_id": "AA", "start": {"residue_number": 1}, "end": {"residue_number": 1542}, ...},
-          ...
-        ]
-      },
-      "RF02541": { ... }
-    }
-  }
-}
-```
+For each `(pdb_id, auth_chain_id)` the package picks the **single
+highest-bit-score** Rfam accession. This collapses the cross-family
+HMM hits that PDBe's REST endpoint surfaces (e.g. a eukaryotic 18S
+chain being tagged simultaneously with RF00177 bacterial 16S +
+RF01959 archaeal SSU + RF01960 eukaryotic 18S) down to the single
+biologically-correct family — which eliminates the MIXED rRNA-core
+edge case at its source.
 
 Treatment:
 
-- Parsed into `{auth_chain_id: [Rfam_accession, ...]}`.
-- Merged into the chain-level Rfam set produced from the RCSB
-  `rcsb_polymer_entity_annotation` field (de-duplicated).
-- The merged map is what §6.1 (Rfam role table) and §8.2 (rRNA-core
+- Parsed into `{auth_chain_id: [single_best_Rfam_accession]}`.
+- Replaces (not merges with) the chain-level Rfam set produced from
+  the RCSB `rcsb_polymer_entity_annotation` field — the file is
+  authoritative when it has a hit. Chains not in the file keep their
+  RCSB-supplied Rfam tags (typically none for rRNA).
+- The resulting map is what §6.1 (Rfam role table) and §8.2 (rRNA-core
   determination) consult.
-- An HTTP 404 from the endpoint is treated as "no PDBe Rfam mappings
-  for this entry" — not a fatal error — and the RCSB-only map is used
-  unchanged.
-- Responses are cached under the `pdbe/` namespace alongside `rcsb/`
-  and `bgsu/`.
+- A network failure or missing local file is non-fatal — the
+  RCSB-only map is used unchanged.
+- See §32 for the full data-source, refresh-policy, and CLI surface
+  specification.
 
 ### 5.4 PDB/mmCIF coordinate files
 
@@ -1025,24 +1030,19 @@ rrna_core = "mixed"           if bacterial_like AND eukaryotic_like are both tru
 rrna_core = "ambiguous"       otherwise
 ```
 
-`"mixed"` → resolve via the dominant protein-superkingdom vote
-(§31.5). The resolution is deferred until §8.3 has computed
-`dominant_sk`, then:
+`"mixed"` → defensive demotion to `"bacterial_like"` with warning
+`mixed_rrna_core_treated_as_bacterial_like`.
 
-- `dominant_sk == "Eukaryota"` → `rrna_core := "eukaryotic_like"`
-- otherwise → `rrna_core := "bacterial_like"`
-
-Emit warning `mixed_rrna_core_resolved_via_protein_vote` and write
-`rrna_core_resolved` into the classification evidence dict.
-
-This replaces the v3.0 behaviour of always demoting MIXED to
-`"bacterial_like"`. Discovered empirically: PDBe's HMM-based Rfam
-mapping over-annotates eukaryotic 80S rRNA chains with bacterial
-*and* eukaryotic Rfam families simultaneously (e.g. 9B0S has the 18S
-rRNA tagged with RF00177 + RF01959 + RF01960 and the 28S with
-RF02540 + RF02541 + RF02543). The always-bacterial demotion routed
-those entries into `eukaryotic_organellar_ribosome`; the protein-vote
-resolution correctly puts them into `eukaryotic_ribosome` instead.
+This branch is **unreachable from real data** in v3.2 because the
+production Rfam source (§32, EBI `pdb_full_region.txt.gz`) selects
+the single highest-bit-score Rfam accession per chain, so each
+chain's `rfam_accessions` list contains at most one entry and the
+`bacterial_like AND eukaryotic_like` predicate cannot both be true.
+The demotion is preserved as a belt-and-braces fallback for
+synthetic / hand-crafted `ChainRef`s in tests that supply multi-tag
+annotations directly. See §31.5 for the v3.2-rc1 protein-vote
+resolution that was used briefly before §32 made the workaround
+unnecessary.
 
 `"ambiguous"` → skip the assembly with
 `skip_reason="ambiguous_rrna_core"`.
@@ -3915,38 +3915,28 @@ organellar P-tRNAs collapses (the `pe` SSU hybrid label cannot be
 detected); E-tRNA *assignment* (§11.5) is unaffected because it uses
 `lsu_etrna` only.
 
-### 31.5 MIXED rRNA-core resolution via protein vote
+### 31.5 MIXED rRNA-core handling — superseded by §32
 
-**Problem.** PDBe's HMM-based Rfam mapping over-annotates some rRNA
-chains with multiple cross-family hits. 9B0S' 18S rRNA chain is
-tagged with RF00177 (bacterial 16S) + RF01959 (archaeal SSU) +
-RF01960 (eukaryotic 18S); its 28S has RF02540 (archaeal LSU) +
-RF02541 (bacterial 23S) + RF02543 (eukaryotic 28S). This triggers
+**Historical context.** PDBe's HMM-based Rfam mapping over-annotates
+some rRNA chains with multiple cross-family hits. 9B0S' 18S rRNA
+chain was tagged with RF00177 (bacterial 16S) + RF01959 (archaeal
+SSU) + RF01960 (eukaryotic 18S); its 28S had RF02540 (archaeal LSU)
++ RF02541 (bacterial 23S) + RF02543 (eukaryotic 28S). This triggered
 `determine_rrna_core` to return `"mixed"`. The v3.0 spec demoted
 MIXED to `"bacterial_like"` unconditionally, which combined with the
 Eukaryota protein vote routed 9B0S into
 `eukaryotic_organellar_ribosome` — the wrong classification (it's a
 human cytoplasmic 80S di-ribosome).
 
-**Resolution.** The MIXED demotion is delayed until after the §8.3
-protein vote and uses the dominant superkingdom:
-
-```python
-if rrna_core == RRNA_CORE_MIXED:
-    warnings.append("mixed_rrna_core_resolved_via_protein_vote")
-    rrna_core = (
-        RRNA_CORE_EUKARYOTIC
-        if dominant_sk == "Eukaryota"
-        else RRNA_CORE_BACTERIAL
-    )
-    evidence["rrna_core_resolved"] = rrna_core
-```
-
-True biological chimeras (e.g. synthetic hybrid ribosomes) are rare;
-PDBe over-annotation is the dominant cause in practice. The
-protein-vote-driven resolution handles the dominant case and the
-warning surfaces the MIXED detection for any consumer that needs to
-audit it.
+An interim v3.2-rc1 fix delayed the MIXED demotion until after the
+§8.3 protein vote so 9B0S would resolve to eukaryotic based on the
+protein evidence. That fix was reverted in v3.2 — see §32. The
+production Rfam source (EBI `pdb_full_region.txt.gz`, single best
+bit-score per chain) yields at most one Rfam accession per chain,
+which makes MIXED unreachable from real data. The defensive demotion
+in `classify_assembly` is preserved as a fallback (returns
+`bacterial_like`) for synthetic / hand-crafted `ChainRef`s in tests
+that supply multi-tag annotations directly.
 
 ### 31.6 Description-based mRNA-pool exclusion
 
@@ -4052,3 +4042,182 @@ mapping):
 | 9B0S | `7ZW0\|1\|2\|G\|1150`  | `9B0S\|1\|s2\|G\|1207`    | S2                    |
 | 9B0S | `7ZW0\|1\|LA\|G\|2922` | `9B0S\|1\|l5\|G\|4499`    | L5                    |
 | 7AZO | `5J7L\|1\|AA\|A\|1492` | `7AZO\|1\|16SB\|A\|2115`  | 16SA (assembly 1 has 16SA, BGSU returned a chain from assembly 2) |
+
+## 32. Rfam ``pdb_full_region`` integration (rRNA Rfam source)
+
+### 32.1 Goal
+
+Provide a single best-bit-score Rfam accession per `(pdb_id, chain)`
+for every PDB rRNA / tRNA chain, replacing the per-entry PDBe REST
+endpoint specified in §5.3 v3.1. The new source resolves the MIXED
+rRNA-core edge case (§31.5 / §8.2) at the data layer: single-best
+selection means each chain carries at most one Rfam family, so the
+`determine_rrna_core` function cannot produce a MIXED verdict from
+real data.
+
+### 32.2 Source
+
+EBI publishes the file at:
+
+```
+https://ftp.ebi.ac.uk/pub/databases/Rfam/.preview/pdb_full_region.txt.gz
+```
+
+Format: tab-separated, gzipped, ~200 KB compressed, ~28 k rows
+spanning ~4400 distinct PDBs. Columns:
+
+| # | Field | Notes |
+|--:|-------|-------|
+| 1 | `rfam_acc`         | e.g. `RF00177` (bacterial 16S) |
+| 2 | `pdb_id`           | lowercase 4-character PDB ID |
+| 3 | `auth_chain_id`    | case-sensitive author chain identifier |
+| 4 | `seq_start`        | start residue (sequence-based) |
+| 5 | `seq_end`          | end residue |
+| 6 | `bit_score`        | cmsearch alignment bit-score |
+| 7 | `e_value`          | cmsearch e-value |
+| 8 | `cm_start`         | covariance-model alignment start |
+| 9 | `cm_end`           | covariance-model alignment end |
+| 10 | `color`           | display colour (ignored) |
+| 11 | `strand`          | orientation flag (ignored) |
+
+The package reads columns 1, 2, 3, 6 and ignores the rest.
+
+### 32.3 Local cache layout
+
+```
+~/.cache/ribosome-state-annotator/rfam/
+├── pdb_full_region.txt.gz                    # the latest file
+└── pdb_full_region.metadata.json             # sidecar
+```
+
+The metadata sidecar records:
+
+```json
+{
+  "source_url": "https://ftp.ebi.ac.uk/pub/databases/Rfam/.preview/pdb_full_region.txt.gz",
+  "downloaded_at": "2026-05-19T12:00:00+00:00",
+  "last_modified": "Mon, 18 May 2026 09:37:40 GMT",
+  "local_file": "pdb_full_region.txt.gz"
+}
+```
+
+### 32.4 Refresh policy
+
+Mirrors the §29.4 RADdb policy:
+
+1. **Cache missing** → download immediately.
+2. **Cache present + force-refresh flag** → HEAD-probe the upstream
+   URL; compare `Last-Modified` against the cached value; download if
+   they differ.
+3. **Cache present + age ≥ 7 days** (`STALENESS_DAYS`) → same HEAD
+   probe + conditional re-download.
+4. **Cache present + age < 7 days** → use the cached file, no network.
+5. **Any network failure with a local file** → keep the local file and
+   log a warning.
+6. **Any network failure without a local file** → return `None`; the
+   pipeline continues with RCSB-supplied Rfam tags only.
+
+The HEAD probe + `Last-Modified` comparison is cheaper than a full
+download. EBI's `Last-Modified` is a stable identifier of the file
+version.
+
+### 32.5 Parsing and best-score selection
+
+```python
+def build_rfam_pdb_region_lookup(
+    rows: list[tuple[str, str, str, float]],   # (rfam, pdb, chain, bit_score)
+) -> dict[tuple[str, str], str]:
+    """Pick the single best-score Rfam per (pdb_id_lower, chain_id).
+
+    Ties are broken by input row order (rare in practice).
+    """
+    best_score: dict[tuple[str, str], float] = {}
+    best_acc:   dict[tuple[str, str], str]   = {}
+    for rfam_acc, pdb_id, chain_id, bit_score in rows:
+        key = (pdb_id, chain_id)
+        if key not in best_score or bit_score > best_score[key]:
+            best_score[key] = bit_score
+            best_acc[key]   = rfam_acc
+    return best_acc
+```
+
+### 32.6 Why single-best disambiguates MIXED at the source
+
+PDBe's HMM-based scanner hits multiple cross-family Rfam models on the
+same rRNA chain because the models share covariance ancestry. Example:
+9B0S chain `s2` (human cytoplasmic 18S, 1740 nt) reports four hits:
+
+| Rfam   | family            | bit_score |
+|--------|-------------------|----------:|
+| RF00177 | bacterial 16S    |    456.3 |
+| RF01959 | archaeal SSU     |    581.4 |
+| **RF01960** | **eukaryotic 18S** | **1669.0** |
+| RF02542 | (broad rRNA CM)  |    822.0 |
+
+The bit-score is dominated by the biologically-correct family.
+Best-score selection picks `RF01960` cleanly. With the v3.1 PDBe REST
+source all four Rfam accessions were merged onto the chain, which
+combined with the matching pattern on the 28S triggered `MIXED` in
+`determine_rrna_core` (§8.2) and routed 9B0S into
+`eukaryotic_organellar_ribosome`. The MIXED-protein-vote fix in §31.5
+was a workaround for that downstream symptom; the v3.2 single-best
+selection eliminates the symptom at the source.
+
+### 32.7 API surface
+
+```python
+from ribosome_state_annotator.rfam_pdb_region import (
+    RfamPdbRegionDataset,
+    RfamPdbRegionMetadata,
+    ensure_rfam_pdb_region_available,
+    load_rfam_pdb_region_dataset,
+    get_rfam_for_chain,
+    get_rfam_mapping_for_pdb,
+)
+```
+
+`get_rfam_mapping_for_pdb(dataset, pdb_id) -> dict[str, list[str]]`
+returns `{auth_chain_id: [single_rfam_accession]}` — wire-compatible
+with the legacy PDBe REST parsed shape, so `api.py`'s
+`_apply_rfam_pdb_region` is a one-line replacement of the old
+`_augment_chain_rfam`.
+
+`annotate_pdb` and `annotate_many` accept:
+
+- `rfam_dataset: RfamPdbRegionDataset | None` — pre-loaded dataset to
+  thread through a batch.
+- `refresh_rfam: bool` — force an upstream check on this run.
+- `no_rfam: bool` — skip the file entirely (RCSB tags only).
+
+### 32.8 CLI
+
+Mirrors the RADdb CLI surface:
+
+```text
+ribostate rfam info       # show cache location, last_modified, downloaded_at, bytes
+ribostate rfam refresh    # force HEAD-probe + conditional download
+```
+
+The `annotate` and `annotate-batch` subcommands accept
+`--refresh-rfam` (same semantics as `--refresh-raddb`).
+
+### 32.9 Tests
+
+`tests/test_rfam_pdb_region.py` covers:
+
+- Path helpers and metadata round-trip.
+- Parser tolerance for malformed rows (skip silently).
+- Best-bit-score selection across overlapping Rfam hits (9B0S vignette).
+- `get_rfam_for_chain` lookup behaviour (PDB ID case-insensitive,
+  chain case-sensitive, unknown PDB returns `None`).
+- `ensure_rfam_pdb_region_available` flow: download-when-missing,
+  reuse-when-unchanged, refresh-when-stale, return-None-when-offline.
+
+### 32.10 Migration note
+
+The v3.1 PDBe REST machinery (module `pdbe_client.py`, cache namespace
+`pdbe/`, helper `api._augment_chain_rfam`) is removed from the
+annotation pipeline. The `pdbe/` cache namespace remains in `cache.py`
+so existing user caches don't crash on the new version; the entries
+inside it are no longer consulted and can be deleted at the user's
+convenience via `ribostate cache clear`.
