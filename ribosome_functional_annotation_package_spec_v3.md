@@ -698,7 +698,7 @@ ssu_main_rrna_chains: list[ChainRef]
 lsu_main_rrna_chains: list[ChainRef]
 lsu_associated_rrna_chains: list[ChainRef]
 trna_chains: list[ChainRef]
-other_rna_chains: list[ChainRef]
+unmapped_rna_chains: list[ChainRef]
 ```
 
 For convenience, if there is exactly one SSU main rRNA and one LSU main rRNA, expose aliases:
@@ -1255,7 +1255,7 @@ class RibosomeAnnotation(BaseModel):
     ssu_main_rrna_chains: list[ChainRef] = []
     lsu_main_rrna_chains: list[ChainRef] = []
     lsu_associated_rrna_chains: list[ChainRef] = []  # e.g. 5S, 5.8S
-    other_rna_chains: list[ChainRef] = []  # RNAs not assigned to any role
+    unmapped_rna_chains: list[ChainRef] = []  # RNAs not assigned to any role
 
     # Functional chains assigned by contact-transfer
     mrna_chain: ChainRef | None = None
@@ -1404,7 +1404,7 @@ rRNA fields:
 - `lsu_main_rrna_chains` — every chain whose Rfam role is `lsu_main_rrna`.
 - `lsu_associated_rrna_chains` — every chain whose Rfam role is
   `lsu_associated_rrna` (typically 5S, 5.8S).
-- `other_rna_chains` — any RNA chain in the assembly that is not assigned
+- `unmapped_rna_chains` — any RNA chain in the assembly that is not assigned
   one of the roles above AND is not subsequently assigned as mRNA / A-tRNA /
   P-tRNA / E-tRNA.
 
@@ -1464,7 +1464,7 @@ Find RNA chains neighbouring the mapped `ssu_mrna` reference site. Exclude SSU/L
 > (case-insensitive) is *also* excluded from the mRNA candidate pool.
 > The risk of a false-positive (an mRNA labelled "tRNA-binding-site
 > mimic") is acceptable because mRNA assignment then just skips and
-> the chain falls into `other_rna_chains`.
+> the chain falls into `unmapped_rna_chains`.
 
 ### 11.3 P-site tRNA assignment
 
@@ -1944,7 +1944,7 @@ Example:
     {"auth_asym_id": "BA", "ife": "5J7L|1|BA",
      "rfam_accessions": ["RF00001"], "polymer_type": "RNA"}
   ],
-  "other_rna_chains": [],
+  "unmapped_rna_chains": [],
   "ssu_chain": {"auth_asym_id": "AA", "ife": "5J7L|1|AA"},
   "lsu_chain": {"auth_asym_id": "DA", "ife": "5J7L|1|DA"},
   "mrna_chain": {"auth_asym_id": "X", "ife": "5J7L|1|X"},
@@ -3351,7 +3351,7 @@ claim the chain, but the result is an unassigned A-site even though
 codon-anticodon pairing is unambiguous in FR3D.
 
 The fallback closes this gap. Before per-site extraction, scan every
-unassigned tRNA-Rfam chain (those in `other_rna_chains` with Rfam
+unassigned tRNA-Rfam chain (those in `unmapped_rna_chains` with Rfam
 RF00005) for cWW FR3D pairs to the mRNA chain at the anticodon
 residues (auth_seq_id 34/35/36 per §30.4). Disambiguate which empty
 site each candidate fills using the **mRNA codon position**:
@@ -3370,7 +3370,7 @@ Each fallback assignment:
 
 - Mutates `annotation.aminoacyl_trna_chain` /
   `peptidyl_trna_chain` / `exit_trna_chain` in place.
-- Removes the chain from `other_rna_chains`.
+- Removes the chain from `unmapped_rna_chains`.
 - Appends a warning of the form
   `<site>trna_assigned_from_fr3d_codon_pairing_<chain_id>`.
 - Records the assignment under
@@ -3383,7 +3383,7 @@ The fallback runs only when:
 - An mRNA chain is present.
 - At least one of A / P / E is empty.
 - An unassigned tRNA-Rfam chain (`RF00005` in `rfam_accessions`)
-  exists in `other_rna_chains`.
+  exists in `unmapped_rna_chains`.
 - That candidate makes ≥ 1 cWW pair with the mRNA at one of the
   anticodon residues (non-cWW pairs alone don't trigger assignment).
 
@@ -3729,7 +3729,7 @@ plant bacterial dimers (9GFT, 9O3L), CCA-end-fragment dimers (8T8C),
 in-situ human di-ribosomes (9B0S). The classification truth table
 (§8) and the per-assembly contact-transfer (§11) treat the whole
 bundle as one ribosome, filling only one A/P/E set and leaving the
-second ribosome's tRNAs in `other_rna_chains`.
+second ribosome's tRNAs in `unmapped_rna_chains`.
 
 **Detection.** A multi-ribosome bundle is defined by:
 
@@ -3969,7 +3969,7 @@ mrna_candidates = [
 
 False-positive risk (an mRNA chain literally described as
 "tRNA-binding-site mimic") is acceptable: mRNA assignment then
-silently skips and the chain falls into `other_rna_chains`, where
+silently skips and the chain falls into `unmapped_rna_chains`, where
 the consumer can re-inspect.
 
 ### 31.7 Fragment-vs-displaced state vocabulary
@@ -4006,7 +4006,7 @@ assignment passes require a ≤cutoff anchor contact for any role, so
 this state shouldn't appear from a normal run. A defensive
 post-processing step in `api._demote_no_contact_fragments` checks
 each assigned tRNA's state after `compute_trna_states` and demotes
-to `other_rna_chains` any chain whose state begins with `**/` and
+to `unmapped_rna_chains` any chain whose state begins with `**/` and
 ends with `**` (i.e. `**/**`), and any E-tRNA whose state begins
 with `**/`.
 

@@ -271,7 +271,7 @@ class RibosomeAnnotation(BaseModel):
     ssu_main_rrna_chains: list[ChainRef] = Field(default_factory=list)
     lsu_main_rrna_chains: list[ChainRef] = Field(default_factory=list)
     lsu_associated_rrna_chains: list[ChainRef] = Field(default_factory=list)  # 5S, 5.8S
-    other_rna_chains: list[ChainRef] = Field(default_factory=list)
+    unmapped_rna_chains: list[ChainRef] = Field(default_factory=list)
 
     # Functional chains assigned by contact-transfer (§11).
     mrna_chain: ChainRef | None = None

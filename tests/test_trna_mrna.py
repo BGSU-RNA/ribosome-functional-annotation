@@ -811,7 +811,7 @@ def test_fallback_noop_when_mrna_missing() -> None:
     structure, _, trna1, _ = _fallback_structure_two_trnas()
     ann = RibosomeAnnotation(pdb_id=PDB, assembly_id="1", status="annotated")
     ann.mrna_chain = None  # no mRNA
-    ann.other_rna_chains = [trna1]
+    ann.unmapped_rna_chains = [trna1]
     fr3d_codon_pairing_fallback(ann, structure, [])
     assert ann.aminoacyl_trna_chain is None
 
@@ -842,7 +842,7 @@ def test_fallback_assigns_a_site_when_one_candidate_has_cww_pair() -> None:
     ann = RibosomeAnnotation(pdb_id=PDB, assembly_id="1", status="annotated")
     ann.mrna_chain = mrna
     ann.peptidyl_trna_chain = trna2  # contact-transfer assigned P
-    ann.other_rna_chains = [trna1]   # A-candidate is unassigned
+    ann.unmapped_rna_chains = [trna1]   # A-candidate is unassigned
 
     rows = [
         _ParsedFr3dRow("TEST|1|MR|U|17", "cWW", "TEST|1|A2|A|36"),
@@ -853,7 +853,7 @@ def test_fallback_assigns_a_site_when_one_candidate_has_cww_pair() -> None:
 
     assert ann.aminoacyl_trna_chain is trna1
     assert ann.peptidyl_trna_chain is trna2  # untouched
-    assert trna1 not in ann.other_rna_chains
+    assert trna1 not in ann.unmapped_rna_chains
     assert any("atrna_assigned_from_fr3d_codon_pairing_A2" in w for w in ann.warnings)
     assert ann.classification_evidence.get("fr3d_codon_pairing_fallback") == {"A": "A2"}
 
@@ -863,7 +863,7 @@ def test_fallback_skips_candidates_without_cww_pair() -> None:
     structure, mrna, trna1, _ = _fallback_structure_two_trnas()
     ann = RibosomeAnnotation(pdb_id=PDB, assembly_id="1", status="annotated")
     ann.mrna_chain = mrna
-    ann.other_rna_chains = [trna1]
+    ann.unmapped_rna_chains = [trna1]
 
     rows = [_ParsedFr3dRow("TEST|1|MR|U|17", "tHS", "TEST|1|A2|A|36")]
     fr3d_codon_pairing_fallback(ann, structure, rows)
@@ -876,7 +876,7 @@ def test_fallback_assigns_a_and_p_by_mrna_codon_position() -> None:
     structure, mrna, trna_upstream, trna_downstream = _fallback_structure_two_trnas()
     ann = RibosomeAnnotation(pdb_id=PDB, assembly_id="1", status="annotated")
     ann.mrna_chain = mrna
-    ann.other_rna_chains = [trna_upstream, trna_downstream]
+    ann.unmapped_rna_chains = [trna_upstream, trna_downstream]
 
     rows = [
         # chain A2 pairs with mRNA residues 10/11/12 (UPSTREAM → P-site)
@@ -918,7 +918,7 @@ def test_fallback_skips_candidates_with_short_trna() -> None:
     mrna_ref = ChainRef(pdb_id=PDB, assembly_id="1", auth_asym_id="MR", polymer_type="RNA")
     ann = RibosomeAnnotation(pdb_id=PDB, assembly_id="1", status="annotated")
     ann.mrna_chain = mrna_ref
-    ann.other_rna_chains = [short_ref]
+    ann.unmapped_rna_chains = [short_ref]
     fr3d_codon_pairing_fallback(ann, structure, [])
     assert ann.aminoacyl_trna_chain is None
 
@@ -931,7 +931,7 @@ def test_fallback_ignores_non_trna_rfam_chains() -> None:
     ann.mrna_chain = mrna
     # Strip RF00005 from the candidate.
     trna1.rfam_accessions = []
-    ann.other_rna_chains = [trna1]
+    ann.unmapped_rna_chains = [trna1]
     rows = [_ParsedFr3dRow("TEST|1|MR|U|17", "cWW", "TEST|1|A2|A|36")]
     fr3d_codon_pairing_fallback(ann, structure, rows)
     assert ann.aminoacyl_trna_chain is None
@@ -952,7 +952,7 @@ def test_extract_uses_fallback_then_extracts_codon_for_filled_a_site() -> None:
     ann = RibosomeAnnotation(pdb_id=PDB, assembly_id="1", status="annotated")
     ann.mrna_chain = mrna
     ann.peptidyl_trna_chain = trna2  # contact-transfer assigned P
-    ann.other_rna_chains = [trna1]
+    ann.unmapped_rna_chains = [trna1]
 
     csv_body = (
         b'"TEST|1|MR|U|19","cWW","TEST|1|A2|A|36"\n'

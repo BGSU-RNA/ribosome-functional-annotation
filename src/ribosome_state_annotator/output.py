@@ -230,7 +230,7 @@ def assembly_csv_rows(annotation: RibosomeAnnotation) -> list[dict[str, str]]:
             seen_ligand_names.add(ligand_name)
             rows.append(_row("", "bound_ligands", ligand_name))
 
-    for chain in annotation.other_rna_chains:
+    for chain in annotation.unmapped_rna_chains:
         rows.append(_row(chain.ife, "unmapped_rna_chains", chain.description or ""))
 
     # v1 extension rows (spec §15.3 explicitly permits these at the end).

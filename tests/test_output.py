@@ -291,7 +291,7 @@ def test_assembly_csv_emits_unmapped_rna_chains() -> None:
         status="annotated",
         ssu_main_rrna_chains=[ssu],
         lsu_main_rrna_chains=[lsu],
-        other_rna_chains=[leftover],
+        unmapped_rna_chains=[leftover],
     )
     rows = output.assembly_csv_rows(ann)
     unmapped_rows = [r for r in rows if r["property"] == "unmapped_rna_chains"]

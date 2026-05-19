@@ -618,7 +618,7 @@ def fr3d_codon_pairing_fallback(
     positions (if any FR3D pairs exist) are read first as frame anchors,
     so the fallback respects the existing frame.
 
-    The annotation's ``other_rna_chains`` is updated and warnings record
+    The annotation's ``unmapped_rna_chains`` is updated and warnings record
     each FR3D-derived assignment so consumers can distinguish it from
     canonical contact-transfer assignments.
 
@@ -647,11 +647,11 @@ def fr3d_codon_pairing_fallback(
         )
         if chain is not None
     }
-    # Candidates: tRNA-Rfam chains currently surfaced as `other_rna_chains`
+    # Candidates: tRNA-Rfam chains currently surfaced as `unmapped_rna_chains`
     # (i.e. not already placed in any role).
     trna_candidates: list[ChainRef] = [
         chain
-        for chain in annotation.other_rna_chains
+        for chain in annotation.unmapped_rna_chains
         if _RFAM_TRNA in chain.rfam_accessions and chain.ife not in assigned_ifes
     ]
     if not trna_candidates:
@@ -703,8 +703,8 @@ def fr3d_codon_pairing_fallback(
         return
 
     promoted_ifes = {chain.ife for _, chain, _ in newly_assigned}
-    annotation.other_rna_chains = [
-        chain for chain in annotation.other_rna_chains if chain.ife not in promoted_ifes
+    annotation.unmapped_rna_chains = [
+        chain for chain in annotation.unmapped_rna_chains if chain.ife not in promoted_ifes
     ]
     for site, chain, _ in newly_assigned:
         annotation.warnings.append(
@@ -802,7 +802,7 @@ def extract_trna_mrna_interactions(
         )
     )
     has_trna_rfam_candidate = any(
-        _RFAM_TRNA in chain.rfam_accessions for chain in annotation.other_rna_chains
+        _RFAM_TRNA in chain.rfam_accessions for chain in annotation.unmapped_rna_chains
     )
     if not (has_assigned_trna or has_trna_rfam_candidate):
         logger.info(

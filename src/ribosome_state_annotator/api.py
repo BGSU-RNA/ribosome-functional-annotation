@@ -935,7 +935,7 @@ def _build_annotated_annotation(
     warnings: list[str],
     raddb_dataset: RADdbDataset | None = None,
 ) -> RibosomeAnnotation:
-    # Compute other_rna_chains: RNA chains that weren't placed in any
+    # Compute unmapped_rna_chains: RNA chains that weren't placed in any
     # OUTPUT bucket (rRNA roles + the four functional-chain slots).
     #
     # The "trna" partition bucket is intentionally NOT in this exclusion
@@ -957,7 +957,7 @@ def _build_annotated_annotation(
     ):
         if chain is not None:
             placed_ifes.add(chain.ife)
-    other_rna_chains = [chain for chain in assembly.rna_chains if chain.ife not in placed_ifes]
+    unmapped_rna_chains = [chain for chain in assembly.rna_chains if chain.ife not in placed_ifes]
 
     non_ribosomal_proteins = [
         chain for chain in assembly.protein_chains if not chain.is_ribosomal_protein
@@ -987,7 +987,7 @@ def _build_annotated_annotation(
         ssu_main_rrna_chains=list(by_role.get("ssu_main_rrna", [])),
         lsu_main_rrna_chains=list(by_role.get("lsu_main_rrna", [])),
         lsu_associated_rrna_chains=list(by_role.get("lsu_associated_rrna", [])),
-        other_rna_chains=other_rna_chains,
+        unmapped_rna_chains=unmapped_rna_chains,
         mrna_chain=assignments.mrna_chain,
         aminoacyl_trna_chain=assignments.aminoacyl_trna_chain,
         peptidyl_trna_chain=assignments.peptidyl_trna_chain,
