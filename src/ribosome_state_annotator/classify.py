@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -33,6 +33,7 @@ from ribosome_state_annotator.models import (
     AssemblyContext,
     ChainRef,
     RibosomeClassification,
+    RibosomeTopology,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class ClassificationResult(BaseModel):
     """
 
     classification: RibosomeClassification | None = None
+    topology: RibosomeTopology = "complete"
     skip_reason: str | None = None
     evidence: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
@@ -261,6 +263,72 @@ WARNING_MIXED_RRNA_CORE = "mixed_rrna_core_treated_as_bacterial_like"
 # bacterial_like label is the right v1 bucket for the §8.5 dispatch.
 _ARCHAEAL_SSU_RFAM = "RF01959"
 _ARCHAEAL_LSU_RFAM = "RF02540"
+
+
+def detect_topology(
+    ssu_chains: list[ChainRef],
+    lsu_chains: list[ChainRef],
+) -> RibosomeTopology | None:
+    """Determine the structural topology from the role-partitioned rRNA chains.
+
+    Returns:
+        ``"complete"`` when both SSU and LSU main rRNA chains are
+        present; ``"isolated_ssu"`` when only SSU is present;
+        ``"isolated_lsu"`` when only LSU is present; ``None`` when
+        neither is present (the assembly is not a ribosome).
+    """
+    has_ssu = len(ssu_chains) >= 1
+    has_lsu = len(lsu_chains) >= 1
+    if has_ssu and has_lsu:
+        return "complete"
+    if has_ssu and not has_lsu:
+        return "isolated_ssu"
+    if not has_ssu and has_lsu:
+        return "isolated_lsu"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Isolated-subunit classification (§33)
+# ---------------------------------------------------------------------------
+
+# Per-subunit Rfam → core-flavour mapping. Used when we only have one
+# subunit and cannot run the §8.2 pair-based rule.
+_BACTERIAL_LIKE_SSU_RFAMS: frozenset[str] = frozenset({
+    C.BACTERIAL_RRNA_CORE_SSU,  # RF00177 bacterial 16S
+    _ARCHAEAL_SSU_RFAM,          # RF01959 archaeal SSU (routes via §8.5 archaeal check)
+})
+_BACTERIAL_LIKE_LSU_RFAMS: frozenset[str] = frozenset({
+    C.BACTERIAL_RRNA_CORE_LSU,  # RF02541 bacterial 23S
+    _ARCHAEAL_LSU_RFAM,          # RF02540 archaeal LSU
+})
+_EUKARYOTIC_LIKE_SSU_RFAMS: frozenset[str] = frozenset({
+    C.EUKARYOTIC_RRNA_CORE_SSU,  # RF01960 eukaryotic 18S
+})
+_EUKARYOTIC_LIKE_LSU_RFAMS: frozenset[str] = frozenset({
+    C.EUKARYOTIC_RRNA_CORE_LSU,  # RF02543 eukaryotic 28S
+})
+
+
+def determine_isolated_subunit_core(
+    chains: list[ChainRef],
+    *,
+    subunit: Literal["ssu", "lsu"],
+) -> str | None:
+    """Determine the rRNA core flavour for an isolated SSU/LSU.
+
+    Returns ``"bacterial_like"`` (includes archaeal — routed via §8.5)
+    or ``"eukaryotic_like"``, or ``None`` if no recognised rRNA family
+    is present.
+    """
+    accessions = {acc for chain in chains for acc in chain.rfam_accessions}
+    bacterial = _BACTERIAL_LIKE_SSU_RFAMS if subunit == "ssu" else _BACTERIAL_LIKE_LSU_RFAMS
+    eukaryotic = _EUKARYOTIC_LIKE_SSU_RFAMS if subunit == "ssu" else _EUKARYOTIC_LIKE_LSU_RFAMS
+    if accessions & eukaryotic:
+        return RRNA_CORE_EUKARYOTIC
+    if accessions & bacterial:
+        return RRNA_CORE_BACTERIAL
+    return None
 
 
 def determine_rrna_core(
@@ -471,7 +539,7 @@ def classify_assembly(
             warnings=warnings,
         )
 
-    # 2. SSU/LSU presence
+    # 2. SSU/LSU presence and topology detection
     by_role = partition_rna_chains_by_role(assembly.rna_chains)
     ssu_chains = by_role["ssu_main_rrna"]
     lsu_chains = by_role["lsu_main_rrna"]
@@ -480,18 +548,28 @@ def classify_assembly(
     evidence["ssu_rfam"] = ssu_rfam
     evidence["lsu_rfam"] = lsu_rfam
 
-    if not ssu_chains or not lsu_chains:
+    topology = detect_topology(ssu_chains, lsu_chains)
+    if topology is None:
+        # No SSU and no LSU rRNA detected — not a ribosome assembly at all.
         return ClassificationResult(
             skip_reason=C.SKIP_PARTIAL_MISSING_SSU_OR_LSU,
             evidence=evidence,
             warnings=warnings,
         )
+    evidence["topology"] = topology
 
-    # 3. rRNA core
-    rrna_core = determine_rrna_core(ssu_chains, lsu_chains)
+    # 3. rRNA core determination — topology-aware.
+    if topology == "complete":
+        rrna_core = determine_rrna_core(ssu_chains, lsu_chains)
+    elif topology == "isolated_ssu":
+        rrna_core = determine_isolated_subunit_core(ssu_chains, subunit="ssu") or RRNA_CORE_AMBIGUOUS
+    else:  # isolated_lsu
+        rrna_core = determine_isolated_subunit_core(lsu_chains, subunit="lsu") or RRNA_CORE_AMBIGUOUS
+
     if rrna_core == RRNA_CORE_AMBIGUOUS:
         evidence["rrna_core"] = rrna_core
         return ClassificationResult(
+            topology=topology,
             skip_reason=C.SKIP_AMBIGUOUS_RRNA_CORE,
             evidence=evidence,
             warnings=warnings,
@@ -510,12 +588,33 @@ def classify_assembly(
 
     if dominant_sk == "Archaea":
         return ClassificationResult(
+            topology=topology,
             skip_reason=C.SKIP_ARCHAEAL,
             evidence=evidence,
             warnings=warnings,
         )
     if dominant_sk == SUPERKINGDOM_UNKNOWN:
+        # Isolated SSU/LSU structures often have too few ribosomal proteins
+        # for the §8.3 vote to fire (e.g. naked 50S crystals like 1FFK).
+        # Fall back to rRNA-Rfam-alone classification — bacterial-like rRNA
+        # → bacterial_ribosome; eukaryotic-like → eukaryotic_ribosome.
+        # Complete topologies still require the protein vote to disambiguate
+        # eukaryotic cytoplasmic vs organellar.
+        if topology != "complete" and rrna_core in (RRNA_CORE_BACTERIAL, RRNA_CORE_EUKARYOTIC):
+            rrna_alone_classification: RibosomeClassification = (
+                "eukaryotic_ribosome"
+                if rrna_core == RRNA_CORE_EUKARYOTIC
+                else "bacterial_ribosome"
+            )
+            evidence["rule"] = "rrna_alone_isolated_subunit"
+            return ClassificationResult(
+                classification=rrna_alone_classification,
+                topology=topology,
+                evidence=evidence,
+                warnings=warnings,
+            )
         return ClassificationResult(
+            topology=topology,
             skip_reason=C.SKIP_INSUFFICIENT_TAXONOMY,
             evidence=evidence,
             warnings=warnings,
@@ -537,6 +636,7 @@ def classify_assembly(
     classification = _classification_rule(rrna_core, dominant_sk)
     if classification is None:
         return ClassificationResult(
+            topology=topology,
             skip_reason=C.SKIP_AMBIGUOUS_CLASSIFICATION,
             evidence=evidence,
             warnings=warnings,
@@ -550,19 +650,24 @@ def classify_assembly(
     if classification == "eukaryotic_organellar_ribosome" and not supporting_terms:
         warnings.append(WARNING_ORGANELLAR_NO_KEYWORDS)
 
-    # 8. Completeness threshold
-    threshold = thresholds.for_classification(classification)
-    if len(voting_chains) < threshold:
-        if strict_complete_check:
-            return ClassificationResult(
-                skip_reason=C.SKIP_LOW_PROTEIN_COUNT,
-                evidence=evidence,
-                warnings=warnings,
-            )
-        warnings.append(WARNING_LOW_PROTEIN_COUNT)
+    # 8. Completeness threshold — applies to complete topologies only.
+    # Isolated subunits naturally have fewer ribosomal proteins; using the
+    # complete-ribosome threshold would always trigger a low-count skip.
+    if topology == "complete":
+        threshold = thresholds.for_classification(classification)
+        if len(voting_chains) < threshold:
+            if strict_complete_check:
+                return ClassificationResult(
+                    topology=topology,
+                    skip_reason=C.SKIP_LOW_PROTEIN_COUNT,
+                    evidence=evidence,
+                    warnings=warnings,
+                )
+            warnings.append(WARNING_LOW_PROTEIN_COUNT)
 
     return ClassificationResult(
         classification=classification,
+        topology=topology,
         evidence=evidence,
         warnings=warnings,
     )

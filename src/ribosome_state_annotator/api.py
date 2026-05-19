@@ -448,6 +448,7 @@ def _annotate_one_assembly(
                 status="skipped",
                 skip_reason=C.SKIP_FRAGMENTED_RIBOSOME,
                 ribosome_classification=classification_result.classification,
+                topology=classification_result.topology,
                 ssu_main_rrna_chains=by_role.get("ssu_main_rrna", []),
                 lsu_main_rrna_chains=by_role.get("lsu_main_rrna", []),
                 lsu_associated_rrna_chains=by_role.get("lsu_associated_rrna", []),
@@ -527,6 +528,7 @@ def _annotate_one_assembly(
                 status="failed",
                 skip_reason=f"coordinate_failure: {exc}",
                 ribosome_classification=classification_result.classification,
+                topology=classification_result.topology,
                 ssu_main_rrna_chains=by_role.get("ssu_main_rrna", []),
                 lsu_main_rrna_chains=by_role.get("lsu_main_rrna", []),
                 lsu_associated_rrna_chains=by_role.get("lsu_associated_rrna", []),
@@ -595,6 +597,7 @@ def _run_assignment_for_assembly(
         by_role,
         correspondence_by_site,
         cutoff=cutoff,
+        topology=classification_result.topology,
     )
     site_warnings.extend(assignments.warnings)
 
@@ -605,6 +608,7 @@ def _run_assignment_for_assembly(
         assignments,
         correspondence_by_site,
         cutoff=cutoff,
+        topology=classification_result.topology,
     )
     site_warnings.extend(states.warnings)
 
@@ -915,6 +919,7 @@ def _build_skip_annotation(
         assembly_id=assembly.assembly_id,
         status="skipped",
         skip_reason=classification_result.skip_reason,
+        topology=classification_result.topology,
         classification_evidence=classification_result.evidence,
         warnings=classification_result.warnings,
     )
@@ -978,6 +983,7 @@ def _build_annotated_annotation(
         assembly_id=assembly.assembly_id,
         status="annotated",
         ribosome_classification=classification_result.classification,
+        topology=classification_result.topology,
         ssu_main_rrna_chains=list(by_role.get("ssu_main_rrna", [])),
         lsu_main_rrna_chains=list(by_role.get("lsu_main_rrna", [])),
         lsu_associated_rrna_chains=list(by_role.get("lsu_associated_rrna", [])),

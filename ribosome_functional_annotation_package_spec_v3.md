@@ -4221,3 +4221,150 @@ annotation pipeline. The `pdbe/` cache namespace remains in `cache.py`
 so existing user caches don't crash on the new version; the entries
 inside it are no longer consulted and can be deleted at the user's
 convenience via `ribostate cache clear`.
+
+## 33. Topology field and isolated-subunit annotation
+
+### 33.1 Goal
+
+Annotate isolated SSU and LSU deposits (30S/40S-only structures like
+1J5E, 1FJG, 3T1H; 50S/60S-only structures like 1FFK, 1JJ2) instead of
+skipping them. Add an explicit `topology` field on every annotation so
+consumers can distinguish between complete ribosomes and isolated
+subunits without parsing the chain inventory themselves.
+
+### 33.2 Topology values
+
+```python
+RibosomeTopology = Literal["complete", "isolated_ssu", "isolated_lsu"]
+```
+
+- `"complete"` — both SSU and LSU main rRNA chains are present. Default
+  for canonical 70S / 80S deposits and per-ribosome annotations split
+  from multi-ribosome bundles.
+- `"isolated_ssu"` — only SSU rRNA is present.
+- `"isolated_lsu"` — only LSU rRNA is present.
+
+Detection in `classify.detect_topology`:
+
+```python
+def detect_topology(ssu_chains, lsu_chains) -> RibosomeTopology | None:
+    has_ssu = len(ssu_chains) >= 1
+    has_lsu = len(lsu_chains) >= 1
+    if has_ssu and has_lsu: return "complete"
+    if has_ssu and not has_lsu: return "isolated_ssu"
+    if not has_ssu and has_lsu: return "isolated_lsu"
+    return None  # no rRNA at all → skip with SKIP_PARTIAL_MISSING_SSU_OR_LSU
+```
+
+### 33.3 Classification of isolated subunits
+
+For `complete` topologies, §8.2 / §8.5 apply unchanged. For isolated
+topologies the single-subunit rRNA Rfam family drives classification:
+
+```python
+def determine_isolated_subunit_core(chains, subunit) -> str | None:
+    accessions = {acc for chain in chains for acc in chain.rfam_accessions}
+    if accessions & {RF01960}: return "eukaryotic_like"     # SSU only
+    if accessions & {RF02543}: return "eukaryotic_like"     # LSU only
+    if accessions & {RF00177, RF01959}: return "bacterial_like"  # SSU
+    if accessions & {RF02541, RF02540}: return "bacterial_like"  # LSU
+    return None
+```
+
+Combined with the §8.3 protein-superkingdom vote (or rRNA-family-alone
+when proteins are absent), the result is mapped to the same
+`RibosomeClassification` literal as complete topologies — `bacterial_ribosome`,
+`eukaryotic_ribosome`, or `eukaryotic_organellar_ribosome`. The
+`(topology, classification)` pair is orthogonal: e.g. a bacterial 30S is
+`(isolated_ssu, bacterial_ribosome)`; a human cytoplasmic 60S is
+`(isolated_lsu, eukaryotic_ribosome)`.
+
+Naked rRNA crystals with no proteins use `evidence["rule"] =
+"rrna_alone_isolated_subunit"`. The §7.4 completeness threshold is
+skipped for isolated topologies since they naturally have fewer
+ribosomal proteins than complete ribosomes.
+
+### 33.4 Per-topology assignment
+
+In `infer.assign_functional_chains`:
+
+| Slot | complete | isolated_ssu | isolated_lsu |
+|------|----------|--------------|--------------|
+| mRNA | ssu_mrna | ssu_mrna | None (no SSU) |
+| A | ssu_atrna → LSU fallback | ssu_atrna | LSU fallback (lsu_atrna) |
+| P | ssu_ptrna → LSU fallback | ssu_ptrna | LSU fallback (lsu_ptrna) |
+| E | lsu_etrna | ssu_etrna + leftover heuristic | lsu_etrna |
+
+The SSU-side LSU fallback (§31.2) only fires when `has_lsu`. The
+isolated SSU E-tRNA path adds a fallback heuristic:
+
+```python
+if exit_chain is None:  # canonical ssu_etrna pass missed
+    leftover_trnas = [c for c in candidate_pool
+                      if c.ife in trna_rfam_ifes or _looks_like_trna(c)]
+    if len(leftover_trnas) == 1:
+        # Relaxed 8 Å cutoff (vs canonical 5 Å) — SSU E-site contact
+        # is often loose in isolated 30S structures.
+        if leftover_trnas[0] contacts ssu_etrna within 8 Å:
+            exit_chain = leftover_trnas[0]
+```
+
+The rationale: in a 30S + 3-tRNA structure, after A and P are filled
+by their canonical SSU anchors, the third tRNA is almost certainly at
+the E site even when its ssu_etrna contact is too loose for the 5 Å
+cutoff.
+
+### 33.5 State-string vocabulary extension
+
+The placeholder `-` is added to both SSU and LSU half-states:
+
+| Symbol | Meaning |
+|--------|---------|
+| `A`/`P`/`E`, `ap`/`pe`, `AP`/`PE` | canonical / hybrid contacts (unchanged) |
+| `*` | full polymer (≥ 30 nt) with no contact at this subunit |
+| `**` | chain shorter than 30 nt; can't reach this subunit |
+| `-` | **subunit not in the assembly** (topology=isolated_*) |
+| `<factor>` (LSU only) | non-ribosomal protein at the CCA end (§12.4) |
+
+Examples produced by the new code:
+
+| State | Meaning |
+|-------|---------|
+| `A/A` | canonical A-tRNA on complete ribosome |
+| `A/-` | A-tRNA in 30S-only structure (e.g. 3T1H chain X) |
+| `-/A` | A-tRNA in 50S-only structure |
+| `-/AP` | hybrid-state A-tRNA in 50S-only structure (e.g. 8RXH-style) |
+| `-/E` | E-tRNA in 50S-only structure |
+
+### 33.6 Backward compatibility
+
+- The `topology` field defaults to `"complete"` so JSON consumers that
+  ignore it see no change.
+- `RibosomeClassification` is unchanged (still bacterial / eukaryotic /
+  organellar). Topology is the orthogonal axis.
+- Multi-ribosome bundles still emit per-ribosome annotations with the
+  same suffixed assembly IDs; each sub-annotation has
+  `topology="complete"` since each ribosome is a complete SSU+LSU pair.
+- The `SKIP_PARTIAL_MISSING_SSU_OR_LSU` skip reason now only fires for
+  assemblies with no detectable rRNA at all (not for SSU-only or
+  LSU-only assemblies, which are now annotated).
+- The `**/**` no-contact-fragment safeguard (§31.8) still applies; the
+  `-` placeholder is not affected.
+
+### 33.7 Worked examples
+
+- **1J5E** (T. thermophilus 30S, naked): `topology=isolated_ssu`,
+  `classification=bacterial_ribosome`. No bound tRNAs or mRNA in the
+  deposit — A/P/E remain None.
+- **1FJG** (T. thermophilus 30S + paromomycin + 6-nt mRNA + ASL-Phe):
+  `topology=isolated_ssu`, `classification=bacterial_ribosome`,
+  `mrna_chain=X`. The ASL-Phe is a 17-nt fragment (< 30) so the SSU
+  state for any tRNA-like assignment is `**` rather than `A`/`P`.
+- **3T1H** (T. thermophilus 30S + mRNA + tRNA-Phe + tRNA-Lys):
+  `topology=isolated_ssu`, `classification=bacterial_ribosome`,
+  A-tRNA at chain X with state `A/-`, P-tRNA at chain W with state
+  `P/-`.
+- **1FFK** (Haloarcula marismortui 50S): `topology=isolated_lsu`,
+  classified as archaeal and skipped with
+  `archaeal_ribosome_not_supported` per §7.2 (archaea are still out of
+  scope for v1).

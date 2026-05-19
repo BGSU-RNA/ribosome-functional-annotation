@@ -98,6 +98,14 @@ class TRNAStates(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+_RELAXED_ETRNA_CUTOFF_ANGSTROM = 8.0
+"""Relaxed cutoff for the leftover-tRNA E-site heuristic in isolated SSU
+structures (§33). The canonical 5 Å cutoff catches tight base-pair-style
+contacts at SSU anchors; the E-site of an isolated 30S is often more
+loosely engaged, so we widen the search to 8 Å but only when exactly
+one tRNA-like chain is still in the candidate pool."""
+
+
 # ---------------------------------------------------------------------------
 # Chain assignment (§11)
 # ---------------------------------------------------------------------------
@@ -110,6 +118,7 @@ def assign_functional_chains(
     correspondence_by_site: Mapping[str, CorrespondenceResult],
     *,
     cutoff: float = DEFAULT_CONTACT_CUTOFF_ANGSTROM,
+    topology: str = "complete",
 ) -> ChainAssignments:
     """Assign the mRNA, A-tRNA, P-tRNA, and E-tRNA chains.
 
@@ -127,6 +136,13 @@ def assign_functional_chains(
             Sites without a result simply skip the corresponding
             assignment.
         cutoff: Contact cutoff in angstroms (§10.2 default 5.0).
+        topology: ``"complete"`` (default), ``"isolated_ssu"``, or
+            ``"isolated_lsu"`` — see §33. For ``isolated_ssu`` the LSU
+            anchor passes are skipped (E-tRNA falls back to
+            ``ssu_etrna`` and a leftover-tRNA heuristic). For
+            ``isolated_lsu`` the SSU anchor passes are skipped (A and P
+            are assigned via ``lsu_atrna`` / ``lsu_ptrna`` directly; E
+            uses ``lsu_etrna``).
     """
     warnings: list[str] = []
 
@@ -138,11 +154,21 @@ def assign_functional_chains(
         chain for chain in assembly.rna_chains if chain.ife not in rrna_chain_ifes
     ]
 
+    has_ssu = topology in ("complete", "isolated_ssu")
+    has_lsu = topology in ("complete", "isolated_lsu")
+
     # Pre-compute target residues for every site we'll use. Misses (residues
     # the BGSU correspondence pointed at but the mmCIF doesn't have) surface
     # as warnings here.
     site_targets: dict[str, dict[str, list[gemmi.Residue]]] = {}
-    for site_key in (SSU_MRNA, SSU_PTRNA, SSU_ATRNA, LSU_ATRNA, LSU_PTRNA, LSU_ETRNA):
+    sites_to_load: tuple[str, ...]
+    if topology == "isolated_ssu":
+        sites_to_load = (SSU_MRNA, SSU_PTRNA, SSU_ATRNA, SSU_ETRNA)
+    elif topology == "isolated_lsu":
+        sites_to_load = (LSU_ATRNA, LSU_PTRNA, LSU_ETRNA)
+    else:  # complete
+        sites_to_load = (SSU_MRNA, SSU_PTRNA, SSU_ATRNA, LSU_ATRNA, LSU_PTRNA, LSU_ETRNA)
+    for site_key in sites_to_load:
         residues_by_chain, missing = _lookup_target_residues(
             structure, correspondence_by_site.get(site_key)
         )
@@ -150,69 +176,95 @@ def assign_functional_chains(
         for unit_id in missing:
             warnings.append(f"missing_residue_in_coords_{site_key}_{unit_id}")
 
-    # 1. mRNA (§11.2)
-    #
-    # tRNAs (chains annotated as Rfam ``RF00005``) cannot also be mRNA —
-    # the decoding-loop SSU anchors (A1492 / A1493 / etc.) contact tRNAs
-    # too, so an mRNA-pool that includes tRNA-Rfam chains can let a tRNA
-    # spuriously win the closest-distance race for the mRNA slot. Exclude
-    # known-tRNA chains from the mRNA candidate pool only; they're still
-    # eligible for A-tRNA / P-tRNA / E-tRNA assignment below.
-    #
-    # Some mitoribosome deposits annotate the A-tRNA chain without an
-    # Rfam tag (e.g. 7QI5 chain Aw has empty ``rfam_accessions`` despite
-    # description "A/A-tRNA"). To cover those, treat any candidate whose
-    # description contains the substring "tRNA" / "trna" as tRNA-like
-    # and exclude it from the mRNA pool too. mRNA chains never carry
-    # this substring; the worst-case false-positive (an mRNA labelled
-    # "tRNA-binding-site mimic") is acceptable because mRNA assignment
-    # would then simply skip and the chain falls into other_rna_chains.
     trna_rfam_ifes = {c.ife for c in by_role.get("trna", [])}
-    mrna_candidates = [
-        c for c in candidate_pool
-        if c.ife not in trna_rfam_ifes and not _looks_like_trna(c)
-    ]
-    mrna_chain = _pick_chain_by_min_distance(
-        structure,
-        mrna_candidates,
-        site_targets[SSU_MRNA],
-        cutoff=cutoff,
-    )
-    if mrna_chain is not None:
-        candidate_pool = _without(candidate_pool, mrna_chain)
+    mrna_chain: ChainRef | None = None
+    peptidyl_chain: ChainRef | None = None
+    aminoacyl_chain: ChainRef | None = None
+    exit_chain: ChainRef | None = None
 
-    # 2. P-tRNA (§11.3) — uses ssu_ptrna anchors, exclude already-assigned chains.
-    peptidyl_chain = _pick_chain_by_min_distance(
-        structure,
-        candidate_pool,
-        site_targets[SSU_PTRNA],
-        cutoff=cutoff,
-    )
-    if peptidyl_chain is not None:
-        candidate_pool = _without(candidate_pool, peptidyl_chain)
+    if has_ssu:
+        # 1. mRNA (§11.2)
+        #
+        # tRNAs (chains annotated as Rfam ``RF00005``) cannot also be mRNA —
+        # the decoding-loop SSU anchors (A1492 / A1493 / etc.) contact tRNAs
+        # too. Exclude known-tRNA chains from the mRNA candidate pool only;
+        # they're still eligible for A-tRNA / P-tRNA / E-tRNA assignment.
+        # Description-based fallback catches mitoribosome A-tRNAs and
+        # synthetic tRNA analogs that lack the Rfam RF00005 tag.
+        mrna_candidates = [
+            c for c in candidate_pool
+            if c.ife not in trna_rfam_ifes and not _looks_like_trna(c)
+        ]
+        mrna_chain = _pick_chain_by_min_distance(
+            structure,
+            mrna_candidates,
+            site_targets[SSU_MRNA],
+            cutoff=cutoff,
+        )
+        if mrna_chain is not None:
+            candidate_pool = _without(candidate_pool, mrna_chain)
 
-    # 3. A-tRNA (§11.4) — exclude mRNA and P-tRNA. The §11.4 "prefer non-mRNA"
-    # tiebreaker is already enforced because mRNA was removed from the pool.
-    aminoacyl_chain = _pick_chain_by_min_distance(
-        structure,
-        candidate_pool,
-        site_targets[SSU_ATRNA],
-        cutoff=cutoff,
-    )
-    if aminoacyl_chain is not None:
-        candidate_pool = _without(candidate_pool, aminoacyl_chain)
+        # 2. P-tRNA (§11.3) — uses ssu_ptrna anchors.
+        peptidyl_chain = _pick_chain_by_min_distance(
+            structure,
+            candidate_pool,
+            site_targets[SSU_PTRNA],
+            cutoff=cutoff,
+        )
+        if peptidyl_chain is not None:
+            candidate_pool = _without(candidate_pool, peptidyl_chain)
 
-    # 4. E-tRNA (§11.5) — uses LSU E-site anchors. If the only candidate is
-    # the already-assigned P-tRNA (a P/E hybrid state on the same chain),
-    # we don't assign an independent E-tRNA. The candidate pool here
-    # already excludes peptidyl_chain, so a P/E hybrid produces an empty
-    # candidate set for E-tRNA — exactly the intended behaviour.
-    exit_chain = _pick_chain_by_min_distance(
-        structure,
-        candidate_pool,
-        site_targets[LSU_ETRNA],
-        cutoff=cutoff,
-    )
+        # 3. A-tRNA (§11.4) — uses ssu_atrna anchors.
+        aminoacyl_chain = _pick_chain_by_min_distance(
+            structure,
+            candidate_pool,
+            site_targets[SSU_ATRNA],
+            cutoff=cutoff,
+        )
+        if aminoacyl_chain is not None:
+            candidate_pool = _without(candidate_pool, aminoacyl_chain)
+
+    # 4. E-tRNA — anchor source depends on topology.
+    #
+    # For complete / isolated_lsu: use lsu_etrna (canonical).
+    # For isolated_ssu: use ssu_etrna. If no chain contacts the SSU E-site
+    # anchor within cutoff, fall back to the "leftover tRNA = likely E"
+    # heuristic — if exactly one tRNA-like chain is still in the
+    # candidate pool and contacts ssu_etrna within a relaxed 8 Å cutoff,
+    # assign it. This catches typical 30S structures with 3 bound tRNAs
+    # (A, P, E) where the third tRNA sits at the SSU exit site but
+    # doesn't tightly contact the canonical SSU E anchors (G693 / A694
+    # in E. coli).
+    if has_lsu:
+        exit_chain = _pick_chain_by_min_distance(
+            structure,
+            candidate_pool,
+            site_targets[LSU_ETRNA],
+            cutoff=cutoff,
+        )
+    else:  # isolated_ssu
+        exit_chain = _pick_chain_by_min_distance(
+            structure,
+            candidate_pool,
+            site_targets[SSU_ETRNA],
+            cutoff=cutoff,
+        )
+        if exit_chain is None:
+            leftover_trnas = [
+                c
+                for c in candidate_pool
+                if c.ife in trna_rfam_ifes or _looks_like_trna(c)
+            ]
+            if len(leftover_trnas) == 1:
+                relaxed = _RELAXED_ETRNA_CUTOFF_ANGSTROM
+                dists = _compute_chain_distances(
+                    structure,
+                    leftover_trnas,
+                    site_targets[SSU_ETRNA],
+                    cutoff=relaxed,
+                )
+                if dists:
+                    exit_chain = leftover_trnas[0]
     if exit_chain is not None:
         candidate_pool = _without(candidate_pool, exit_chain)
 
@@ -234,7 +286,7 @@ def assign_functional_chains(
     # closer-site choice picks the correct site without changing the
     # canonical-SSU happy path (where A-tRNA is picked via ssu_atrna
     # before the fallback fires at all).
-    if aminoacyl_chain is None or peptidyl_chain is None:
+    if has_lsu and (aminoacyl_chain is None or peptidyl_chain is None):
         lsu_a_distances = _compute_chain_distances(
             structure, candidate_pool, site_targets[LSU_ATRNA], cutoff=cutoff
         )
@@ -385,21 +437,31 @@ def compute_trna_states(
     correspondence_by_site: Mapping[str, CorrespondenceResult],
     *,
     cutoff: float = DEFAULT_CONTACT_CUTOFF_ANGSTROM,
+    topology: str = "complete",
 ) -> TRNAStates:
     """Compute the SSU/LSU functional state strings for the assigned tRNAs.
 
-    Spec §12.1 / §12.2 / §12.3:
+    Spec §12.1 / §12.2 / §12.3 (+ §33 topology extension):
 
     - A-tRNA: ``<SSU state>/<LSU state>`` with SSU ∈ {``A``, ``ap``, ``*``,
-      ``**``} based on ssu_atrna / ssu_ptrna contacts (``**`` when the
-      chain is shorter than :data:`ASL_FRAGMENT_MAX_LENGTH` and missing
-      the SSU contact — CCA-end analog; ``*`` when full-length but
-      positionally displaced — pre-accommodation tRNA), LSU ∈ {``A``,
-      ``P``, ``AP``, ``**``, ``*``, <factor description>} based on
-      lsu_atrna / lsu_ptrna contacts and §12.4 fallback.
-    - P-tRNA: same pattern with SSU ∈ {``P``, ``pe``, ``*``, ``**``} and
-      LSU ∈ {``P``, ``E``, ``PE``, ``**``, ``*``, <factor>}.
-    - E-tRNA: always ``"E/E"`` if assigned; otherwise ``None``.
+      ``**``, ``-``} and LSU ∈ {``A``, ``P``, ``AP``, ``**``, ``*``,
+      ``-``, <factor description>}.
+    - P-tRNA: SSU ∈ {``P``, ``pe``, ``*``, ``**``, ``-``} and LSU ∈
+      {``P``, ``E``, ``PE``, ``**``, ``*``, ``-``, <factor>}.
+    - E-tRNA: SSU ∈ {``E``, ``*``, ``**``, ``-``} and LSU ∈ {``E``, ``-``}.
+
+    Half-state vocabulary:
+
+      - ``A``, ``P``, ``E`` — canonical contact at the corresponding site.
+      - ``ap`` / ``pe`` — SSU hybrid.
+      - ``AP`` / ``PE`` — LSU hybrid.
+      - ``*`` — full-length polymer (≥30 nt) with no canonical contact at
+        this subunit; positionally displaced.
+      - ``**`` — chain shorter than :data:`ASL_FRAGMENT_MAX_LENGTH`; can't
+        physically reach this subunit.
+      - ``-`` — subunit not present in the assembly (topology=isolated_*).
+      - ``<factor>`` — LSU-side label when the tRNA's CCA end is engaged
+        by a non-ribosomal protein factor (§12.4).
 
     Evidence keys populated on ``trna_state_evidence`` (when applicable):
     ``aminoacyl_trna_factor_*`` and ``peptidyl_trna_factor_*`` per §12.4.
@@ -407,10 +469,10 @@ def compute_trna_states(
     warnings: list[str] = []
     evidence: dict[str, Any] = {}
 
-    # Pre-compute every site's target residues. The A-tRNA / P-tRNA state
-    # branches both need to check whether the chain engages the SSU side
-    # at all (LSU-fallback tRNAs produce the ``*/...`` half-states), so
-    # SSU_ATRNA is included alongside the existing five sites.
+    has_ssu = topology in ("complete", "isolated_ssu")
+    has_lsu = topology in ("complete", "isolated_lsu")
+
+    # Pre-compute every site's target residues.
     state_sites = (SSU_ATRNA, SSU_PTRNA, SSU_ETRNA, LSU_ATRNA, LSU_PTRNA, LSU_ETRNA)
     site_targets: dict[str, dict[str, list[gemmi.Residue]]] = {}
     for site_key in state_sites:
@@ -428,6 +490,8 @@ def compute_trna_states(
         assembly.protein_chains,
         cutoff=cutoff,
         evidence=evidence,
+        has_ssu=has_ssu,
+        has_lsu=has_lsu,
     )
     peptidyl_state = _compute_ptrna_state(
         structure,
@@ -436,12 +500,16 @@ def compute_trna_states(
         assembly.protein_chains,
         cutoff=cutoff,
         evidence=evidence,
+        has_ssu=has_ssu,
+        has_lsu=has_lsu,
     )
     exit_state = _compute_etrna_state(
         structure,
         assignments.exit_trna_chain,
         site_targets,
         cutoff=cutoff,
+        has_ssu=has_ssu,
+        has_lsu=has_lsu,
     )
 
     return TRNAStates(
@@ -461,51 +529,58 @@ def _compute_atrna_state(
     *,
     cutoff: float,
     evidence: dict[str, Any],
+    has_ssu: bool = True,
+    has_lsu: bool = True,
 ) -> str | None:
     """Implement the §12.1 A-tRNA state rules."""
     if atrna_chain is None:
         return None
     chain_name = atrna_chain.auth_asym_id
 
-    contacts_ssu_atrna = _chain_contacts_site(
-        structure, chain_name, site_targets[SSU_ATRNA], cutoff=cutoff
-    )
-    contacts_ssu_ptrna = _chain_contacts_site(
-        structure, chain_name, site_targets[SSU_PTRNA], cutoff=cutoff
-    )
-    contacts_lsu_atrna = _chain_contacts_site(
-        structure, chain_name, site_targets[LSU_ATRNA], cutoff=cutoff
-    )
-    contacts_lsu_ptrna = _chain_contacts_site(
-        structure, chain_name, site_targets[LSU_PTRNA], cutoff=cutoff
-    )
-
-    # SSU state. When the chain doesn't engage the SSU decoding centre at
-    # all, distinguish a structurally-too-short fragment (CCA-end analogs
-    # in 7RQA / 8T8C, ≤ 30 nt) from a full-length tRNA that's positionally
-    # displaced (pre-accommodation tRNAs in 3JAG / 7O7Z / 7OSM / 7UG7,
-    # ~76 nt). The convention mirrors the LSU side: ``**`` = fragment,
-    # ``*`` = full polymer but not at this site.
-    if not contacts_ssu_atrna:
-        chain_length = _get_chain_length(structure, chain_name)
-        ssu_state = "**" if chain_length < ASL_FRAGMENT_MAX_LENGTH else "*"
-    elif contacts_ssu_ptrna:
-        ssu_state = "ap"
+    if has_ssu:
+        contacts_ssu_atrna = _chain_contacts_site(
+            structure, chain_name, site_targets[SSU_ATRNA], cutoff=cutoff
+        )
+        contacts_ssu_ptrna = _chain_contacts_site(
+            structure, chain_name, site_targets[SSU_PTRNA], cutoff=cutoff
+        )
+        # SSU state. When the chain doesn't engage the SSU decoding centre
+        # at all, distinguish a structurally-too-short fragment (CCA-end
+        # analogs, < 30 nt) from a full-length tRNA that's positionally
+        # displaced. Convention: ``**`` = fragment, ``*`` = displaced full
+        # polymer.
+        if not contacts_ssu_atrna:
+            chain_length = _get_chain_length(structure, chain_name)
+            ssu_state = "**" if chain_length < ASL_FRAGMENT_MAX_LENGTH else "*"
+        elif contacts_ssu_ptrna:
+            ssu_state = "ap"
+        else:
+            ssu_state = "A"
     else:
-        ssu_state = "A"
-    lsu_state = _resolve_lsu_state(
-        structure,
-        atrna_chain,
-        protein_chains,
-        contacts_primary=contacts_lsu_atrna,
-        contacts_secondary=contacts_lsu_ptrna,
-        primary_label="A",
-        secondary_label="P",
-        combined_label="AP",
-        cutoff=cutoff,
-        evidence_prefix="aminoacyl_trna",
-        evidence=evidence,
-    )
+        ssu_state = "-"
+
+    if has_lsu:
+        contacts_lsu_atrna = _chain_contacts_site(
+            structure, chain_name, site_targets[LSU_ATRNA], cutoff=cutoff
+        )
+        contacts_lsu_ptrna = _chain_contacts_site(
+            structure, chain_name, site_targets[LSU_PTRNA], cutoff=cutoff
+        )
+        lsu_state = _resolve_lsu_state(
+            structure,
+            atrna_chain,
+            protein_chains,
+            contacts_primary=contacts_lsu_atrna,
+            contacts_secondary=contacts_lsu_ptrna,
+            primary_label="A",
+            secondary_label="P",
+            combined_label="AP",
+            cutoff=cutoff,
+            evidence_prefix="aminoacyl_trna",
+            evidence=evidence,
+        )
+    else:
+        lsu_state = "-"
     return f"{ssu_state}/{lsu_state}"
 
 
@@ -517,48 +592,54 @@ def _compute_ptrna_state(
     *,
     cutoff: float,
     evidence: dict[str, Any],
+    has_ssu: bool = True,
+    has_lsu: bool = True,
 ) -> str | None:
     """Implement the §12.2 P-tRNA state rules."""
     if ptrna_chain is None:
         return None
     chain_name = ptrna_chain.auth_asym_id
 
-    contacts_ssu_ptrna = _chain_contacts_site(
-        structure, chain_name, site_targets[SSU_PTRNA], cutoff=cutoff
-    )
-    contacts_ssu_etrna = _chain_contacts_site(
-        structure, chain_name, site_targets[SSU_ETRNA], cutoff=cutoff
-    )
-    contacts_lsu_ptrna = _chain_contacts_site(
-        structure, chain_name, site_targets[LSU_PTRNA], cutoff=cutoff
-    )
-    contacts_lsu_etrna = _chain_contacts_site(
-        structure, chain_name, site_targets[LSU_ETRNA], cutoff=cutoff
-    )
-
-    # SSU state. Same fragment-vs-displaced convention as the A-tRNA path:
-    # ``**`` for chains shorter than ASL_FRAGMENT_MAX_LENGTH (CCA-end
-    # analogs), ``*`` for full polymers that don't reach the SSU P-site.
-    if not contacts_ssu_ptrna:
-        chain_length = _get_chain_length(structure, chain_name)
-        ssu_state = "**" if chain_length < ASL_FRAGMENT_MAX_LENGTH else "*"
-    elif contacts_ssu_etrna:
-        ssu_state = "pe"
+    if has_ssu:
+        contacts_ssu_ptrna = _chain_contacts_site(
+            structure, chain_name, site_targets[SSU_PTRNA], cutoff=cutoff
+        )
+        contacts_ssu_etrna = _chain_contacts_site(
+            structure, chain_name, site_targets[SSU_ETRNA], cutoff=cutoff
+        )
+        # Same fragment-vs-displaced convention as the A-tRNA path.
+        if not contacts_ssu_ptrna:
+            chain_length = _get_chain_length(structure, chain_name)
+            ssu_state = "**" if chain_length < ASL_FRAGMENT_MAX_LENGTH else "*"
+        elif contacts_ssu_etrna:
+            ssu_state = "pe"
+        else:
+            ssu_state = "P"
     else:
-        ssu_state = "P"
-    lsu_state = _resolve_lsu_state(
-        structure,
-        ptrna_chain,
-        protein_chains,
-        contacts_primary=contacts_lsu_ptrna,
-        contacts_secondary=contacts_lsu_etrna,
-        primary_label="P",
-        secondary_label="E",
-        combined_label="PE",
-        cutoff=cutoff,
-        evidence_prefix="peptidyl_trna",
-        evidence=evidence,
-    )
+        ssu_state = "-"
+
+    if has_lsu:
+        contacts_lsu_ptrna = _chain_contacts_site(
+            structure, chain_name, site_targets[LSU_PTRNA], cutoff=cutoff
+        )
+        contacts_lsu_etrna = _chain_contacts_site(
+            structure, chain_name, site_targets[LSU_ETRNA], cutoff=cutoff
+        )
+        lsu_state = _resolve_lsu_state(
+            structure,
+            ptrna_chain,
+            protein_chains,
+            contacts_primary=contacts_lsu_ptrna,
+            contacts_secondary=contacts_lsu_etrna,
+            primary_label="P",
+            secondary_label="E",
+            combined_label="PE",
+            cutoff=cutoff,
+            evidence_prefix="peptidyl_trna",
+            evidence=evidence,
+        )
+    else:
+        lsu_state = "-"
     return f"{ssu_state}/{lsu_state}"
 
 
@@ -568,29 +649,34 @@ def _compute_etrna_state(
     site_targets: Mapping[str, dict[str, list[gemmi.Residue]]],
     *,
     cutoff: float,
+    has_ssu: bool = True,
+    has_lsu: bool = True,
 ) -> str | None:
     """Implement the §12.3 E-tRNA state rules.
 
     Canonical full-length E-tRNA produces ``E/E``. A chain that doesn't
     contact the SSU exit-site anchor (``ssu_etrna``) gets ``*/E`` if
     full-length, ``**/E`` if shorter than
-    :data:`ASL_FRAGMENT_MAX_LENGTH`. The LSU side is always ``E`` here
-    because the chain was assigned to E via the ``lsu_etrna`` anchor in
-    the first place.
+    :data:`ASL_FRAGMENT_MAX_LENGTH`. For isolated topologies the absent
+    subunit's half-state is ``-``.
     """
     if etrna_chain is None:
         return None
     chain_name = etrna_chain.auth_asym_id
 
-    contacts_ssu_etrna = _chain_contacts_site(
-        structure, chain_name, site_targets[SSU_ETRNA], cutoff=cutoff
-    )
-    if contacts_ssu_etrna:
-        ssu_state = "E"
+    if has_ssu:
+        contacts_ssu_etrna = _chain_contacts_site(
+            structure, chain_name, site_targets[SSU_ETRNA], cutoff=cutoff
+        )
+        if contacts_ssu_etrna:
+            ssu_state = "E"
+        else:
+            chain_length = _get_chain_length(structure, chain_name)
+            ssu_state = "**" if chain_length < ASL_FRAGMENT_MAX_LENGTH else "*"
     else:
-        chain_length = _get_chain_length(structure, chain_name)
-        ssu_state = "**" if chain_length < ASL_FRAGMENT_MAX_LENGTH else "*"
-    return f"{ssu_state}/E"
+        ssu_state = "-"
+    lsu_state = "E" if has_lsu else "-"
+    return f"{ssu_state}/{lsu_state}"
 
 
 def _resolve_lsu_state(

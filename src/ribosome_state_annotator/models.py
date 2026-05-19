@@ -36,6 +36,19 @@ RibosomeClassification = Literal[
     "eukaryotic_ribosome",
     "eukaryotic_organellar_ribosome",
 ]
+RibosomeTopology = Literal["complete", "isolated_ssu", "isolated_lsu"]
+"""Structural topology of an assembly's rRNA content.
+
+- ``"complete"``: both SSU and LSU main rRNA chains are present. The
+  default for canonical 70S / 80S deposits and per-ribosome
+  annotations split from multi-ribosome bundles (di-ribosomes / polysomes).
+- ``"isolated_ssu"``: only SSU main rRNA is present (e.g. T. thermophilus
+  30S structures like 1J5E, 1FJG). Assignment uses SSU anchors only;
+  E-tRNA uses ``ssu_etrna`` (or the leftover-tRNA heuristic) instead of
+  ``lsu_etrna``. State strings render the LSU half as ``-``.
+- ``"isolated_lsu"``: only LSU main rRNA is present (e.g. Haloarcula
+  50S deposits like 1FFK, 1JJ2). Assignment uses LSU anchors only.
+  State strings render the SSU half as ``-``."""
 
 
 class ChainRef(BaseModel):
@@ -247,6 +260,12 @@ class RibosomeAnnotation(BaseModel):
     status: RibosomeStatus
     skip_reason: str | None = None
     ribosome_classification: RibosomeClassification | None = None
+    topology: RibosomeTopology = "complete"
+    """Structural topology — ``complete`` (SSU + LSU), ``isolated_ssu``
+    (30S/40S only), or ``isolated_lsu`` (50S/60S only). Annotation behaviour
+    diverges per topology — see :data:`RibosomeTopology` for details.
+    Skip annotations preserve the default ``"complete"`` because no topology
+    inference happens for skipped assemblies."""
 
     # Canonical role-based rRNA outputs (§6.2). Always lists; may be empty.
     ssu_main_rrna_chains: list[ChainRef] = Field(default_factory=list)

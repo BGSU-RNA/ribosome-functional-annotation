@@ -71,6 +71,13 @@ large-subunit site:
   `**/<state>`. A chain that's a fragment with no anchor contact on
   either subunit (state `**/**`) is demoted to ``unmapped_rna_chains``
   rather than claiming a tRNA role.
+- **Subunit-absent placeholder** (`-`) — used when the deposit is an
+  **isolated subunit** (30S/40S only or 50S/60S only). An A-tRNA in a
+  30S-only structure gets `A/-` (canonical A on SSU, no LSU in the
+  deposit); an A-tRNA in a 50S-only structure gets `-/A`. Distinct
+  from `*` (displaced) and `**` (fragment) — `-` means the missing
+  half isn't physically in the assembly. See the `topology` field on
+  each `RibosomeAnnotation` for the assembly-level signal.
 
 In addition to the per-tRNA functional state, each assembly is
 annotated with two **large-scale movement** metrics from the RAD
@@ -389,12 +396,26 @@ Behaviours accepted in v1 that users should be aware of:
     superkingdom vote, but the `is_ribosomal_protein` flag is set
     only by the narrow rule.
 
+**Assembly topology** is now reported on every annotation via the
+`topology` field (`complete`, `isolated_ssu`, `isolated_lsu`). Isolated
+SSU structures (e.g. 1J5E, 1FJG, 3T1H) and isolated LSU structures
+classify and assign normally — the assignment pipeline runs only the
+SSU passes for `isolated_ssu` and the LSU passes for `isolated_lsu`,
+and state strings render the absent subunit's half as `-` (e.g.
+`A/-` for an A-tRNA in a 30S-only deposit). E-tRNA assignment in
+isolated SSU falls back to a leftover-tRNA heuristic when the
+canonical `ssu_etrna` anchors don't fire: if exactly one tRNA-like
+chain is still in the candidate pool after mRNA / A / P are filled
+and it contacts the SSU exit-site within a relaxed 8 Å cutoff, it's
+assigned to E.
+
 The following are out of scope for v1:
 
 - Archaeal ribosomes (skipped with reason
-  `archaeal_ribosome_not_supported`).
-- Ribosomal fragments and partial assemblies missing either the SSU
-  or the LSU (skipped with `partial_ribosome_missing_ssu_or_lsu`).
+  `archaeal_ribosome_not_supported`) — including isolated archaeal
+  subunits like *Haloarcula* 50S deposits (1FFK, 1JJ2).
+- Ribosomal fragments with no detectable rRNA at all (skipped with
+  `partial_ribosome_missing_ssu_or_lsu`).
 - Asymmetric assemblies with split rRNA (e.g. Tetrahymena /
   Chlamydomonas chloroplast / human mitoribosome where the 28S or 23S
   is biologically cleaved into multiple chains: 1 SSU chain + 2-3 LSU

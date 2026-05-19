@@ -269,14 +269,35 @@ def test_annotate_pdb_nmr_entry_skips_all_assemblies() -> None:
 
 
 @respx.mock
-def test_annotate_pdb_partial_assembly_skips() -> None:
-    """An assembly with SSU but no LSU rRNA → partial_ribosome_missing_ssu_or_lsu."""
+def test_annotate_pdb_isolated_ssu_classifies_with_topology(
+    ribosome_fixture: gemmi.Structure, tmp_path: Path
+) -> None:
+    """An assembly with SSU but no LSU rRNA → annotated with topology=isolated_ssu."""
     entry = _bacterial_entry_payload()
     # Drop the LSU rRNA instance.
     entry["assemblies"][0]["polymer_entity_instances"] = [
         inst
         for inst in entry["assemblies"][0]["polymer_entity_instances"]
         if inst["rcsb_polymer_entity_instance_container_identifiers"]["auth_asym_id"] != "L"
+    ]
+    cif_bytes = _ribosome_cif_bytes(ribosome_fixture, tmp_path)
+    _install_mocks(entry_payload=entry, cif_bytes=cif_bytes)
+
+    results = api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True)
+    assert len(results) == 1
+    assert results[0].topology == "isolated_ssu"
+    assert results[0].ribosome_classification == "bacterial_ribosome"
+
+
+@respx.mock
+def test_annotate_pdb_no_rrna_still_skips() -> None:
+    """An assembly with no rRNA at all keeps the partial-skip reason."""
+    entry = _bacterial_entry_payload()
+    # Drop both SSU + LSU rRNA instances.
+    entry["assemblies"][0]["polymer_entity_instances"] = [
+        inst
+        for inst in entry["assemblies"][0]["polymer_entity_instances"]
+        if inst["rcsb_polymer_entity_instance_container_identifiers"]["auth_asym_id"] not in {"S", "L"}
     ]
     _install_mocks(entry_payload=entry)
 

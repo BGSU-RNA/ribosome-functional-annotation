@@ -232,6 +232,76 @@ def test_assignment_missing_residue_in_coords_emits_warning(
 
 
 # ---------------------------------------------------------------------------
+# Topology-aware assignment (§33)
+# ---------------------------------------------------------------------------
+
+
+def test_isolated_ssu_assignment_uses_ssu_anchors_only(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """For isolated SSU, assignment runs only the SSU passes and the
+    LSU fallback is skipped. mRNA + A + P assignments still work via
+    ssu_mrna/ssu_atrna/ssu_ptrna anchors."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    result = infer.assign_functional_chains(
+        ribosome_fixture, assembly, by_role, correspondence, topology="isolated_ssu"
+    )
+    assert result.mrna_chain is not None and result.mrna_chain.auth_asym_id == "M"
+    assert result.peptidyl_trna_chain is not None and result.peptidyl_trna_chain.auth_asym_id == "TP"
+    assert result.aminoacyl_trna_chain is not None and result.aminoacyl_trna_chain.auth_asym_id == "TA"
+
+
+def test_isolated_lsu_assignment_uses_lsu_anchors_only(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """For isolated LSU, the SSU passes are skipped entirely. A and P
+    come from the LSU-fallback path (closer-LSU-site rule). mRNA is
+    None because there's no SSU."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    result = infer.assign_functional_chains(
+        ribosome_fixture, assembly, by_role, correspondence, topology="isolated_lsu"
+    )
+    assert result.mrna_chain is None
+    # TA contacts lsu_atrna at L/20; TP contacts lsu_ptrna at L/40 in the fixture.
+    assert result.aminoacyl_trna_chain is not None and result.aminoacyl_trna_chain.auth_asym_id == "TA"
+    assert result.peptidyl_trna_chain is not None and result.peptidyl_trna_chain.auth_asym_id == "TP"
+    # TE contacts lsu_etrna at L/60.
+    assert result.exit_trna_chain is not None and result.exit_trna_chain.auth_asym_id == "TE"
+
+
+def test_isolated_ssu_state_strings_use_dash_for_lsu_half(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """For isolated SSU topology, the LSU half of every state string is ``-``."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    assignments = infer.assign_functional_chains(
+        ribosome_fixture, assembly, by_role, correspondence, topology="isolated_ssu"
+    )
+    states = infer.compute_trna_states(
+        ribosome_fixture, assembly, assignments, correspondence, topology="isolated_ssu"
+    )
+    # SSU half is the canonical role letter; LSU half is `-` for every tRNA.
+    assert states.aminoacyl_trna_state == "A/-"
+    assert states.peptidyl_trna_state == "P/-"
+
+
+def test_isolated_lsu_state_strings_use_dash_for_ssu_half(
+    ribosome_fixture: gemmi.Structure,
+) -> None:
+    """For isolated LSU topology, the SSU half of every state string is ``-``."""
+    assembly, by_role, correspondence = _build_ribosome_inputs()
+    assignments = infer.assign_functional_chains(
+        ribosome_fixture, assembly, by_role, correspondence, topology="isolated_lsu"
+    )
+    states = infer.compute_trna_states(
+        ribosome_fixture, assembly, assignments, correspondence, topology="isolated_lsu"
+    )
+    assert states.aminoacyl_trna_state == "-/A"
+    assert states.peptidyl_trna_state == "-/P"
+    assert states.exit_trna_state == "-/E"
+
+
+# ---------------------------------------------------------------------------
 # LSU-based fallback for A/P assignment (tRNA analogs, pre-accommodation tRNAs)
 # ---------------------------------------------------------------------------
 

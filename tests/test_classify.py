@@ -499,18 +499,46 @@ def test_nmr_short_circuits_with_skip_reason() -> None:
     assert result.skip_reason == C.SKIP_NMR
 
 
-def test_missing_ssu_short_circuits() -> None:
+def test_isolated_lsu_classifies_as_bacterial() -> None:
+    """LSU-only assembly (e.g. 1FFK) classifies as bacterial with topology=isolated_lsu."""
     a = _assembly(
         rna_chains=[_bacterial_lsu()],
         protein_chains=_n_proteins(20, "Bacteria"),
     )
     result = classify.classify_assembly(a)
-    assert result.skip_reason == C.SKIP_PARTIAL_MISSING_SSU_OR_LSU
+    assert result.classification == "bacterial_ribosome"
+    assert result.topology == "isolated_lsu"
+    assert result.skip_reason is None
 
 
-def test_missing_lsu_short_circuits() -> None:
+def test_isolated_ssu_classifies_as_bacterial() -> None:
+    """SSU-only assembly (e.g. 1J5E, 1FJG) classifies as bacterial with topology=isolated_ssu."""
     a = _assembly(
         rna_chains=[_bacterial_ssu()],
+        protein_chains=_n_proteins(20, "Bacteria"),
+    )
+    result = classify.classify_assembly(a)
+    assert result.classification == "bacterial_ribosome"
+    assert result.topology == "isolated_ssu"
+    assert result.skip_reason is None
+
+
+def test_isolated_lsu_no_proteins_uses_rrna_alone() -> None:
+    """Naked rRNA structures (no ribosomal proteins) classify via Rfam family alone."""
+    a = _assembly(
+        rna_chains=[_bacterial_lsu()],
+        protein_chains=[],
+    )
+    result = classify.classify_assembly(a)
+    assert result.classification == "bacterial_ribosome"
+    assert result.topology == "isolated_lsu"
+    assert result.evidence["rule"] == "rrna_alone_isolated_subunit"
+
+
+def test_no_rrna_chains_still_skips() -> None:
+    """Assemblies with no detectable rRNA at all still skip with the partial reason."""
+    a = _assembly(
+        rna_chains=[],
         protein_chains=_n_proteins(20, "Bacteria"),
     )
     result = classify.classify_assembly(a)
@@ -644,13 +672,15 @@ def test_evidence_dict_has_required_keys_on_success() -> None:
     assert ev["ribosomal_protein_superkingdom_votes"] == {"Bacteria": 20}
 
 
-def test_evidence_dict_populated_even_on_skip() -> None:
-    """A partial assembly is skipped but ssu_rfam/lsu_rfam are still reported."""
+def test_evidence_dict_populated_for_isolated_subunit() -> None:
+    """An SSU-only assembly is now annotated as isolated_ssu with full evidence."""
     a = _assembly(
         rna_chains=[_bacterial_ssu()],  # SSU only
         protein_chains=_n_proteins(20, "Bacteria"),
     )
     result = classify.classify_assembly(a)
-    assert result.skip_reason == C.SKIP_PARTIAL_MISSING_SSU_OR_LSU
+    assert result.classification == "bacterial_ribosome"
+    assert result.topology == "isolated_ssu"
     assert result.evidence["ssu_rfam"] == ["RF00177"]
     assert result.evidence["lsu_rfam"] == []
+    assert result.evidence["topology"] == "isolated_ssu"
