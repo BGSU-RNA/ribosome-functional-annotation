@@ -378,6 +378,26 @@ def test_demote_no_contact_fragments_preserves_real_assignments() -> None:
     assert new_states.aminoacyl_trna_state == "A/A"
 
 
+def test_demote_no_contact_fragments_preserves_fragment_etrna() -> None:
+    """A fragment-length E-tRNA bound at the LSU E-site (``**/E``) is a
+    legitimate partial-tRNA assignment (e.g. 7Q0R chain 10) and must
+    survive the safeguard."""
+    from ribosome_state_annotator.infer import ChainAssignments, TRNAStates
+    from ribosome_state_annotator.models import ChainRef
+
+    partial_etrna = ChainRef(
+        pdb_id="TEST",
+        assembly_id="1",
+        auth_asym_id="E1",
+        polymer_type="RNA",
+    )
+    assignments = ChainAssignments(exit_trna_chain=partial_etrna)
+    states = TRNAStates(exit_trna_state="**/E")
+    new_assignments, new_states = api._demote_no_contact_fragments(assignments, states)
+    assert new_assignments.exit_trna_chain is partial_etrna
+    assert new_states.exit_trna_state == "**/E"
+
+
 # ---------------------------------------------------------------------------
 # annotate_many
 # ---------------------------------------------------------------------------

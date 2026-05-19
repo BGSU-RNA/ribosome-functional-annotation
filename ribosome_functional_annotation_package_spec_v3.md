@@ -1623,8 +1623,12 @@ Examples:
 E/E         canonical E site
 */E         full polymer at LSU E only (mitoribosome E-tRNA where the
             mt-12S exit-site anchor is filtered out, §31.4)
-**/E        CCA-tripeptide fragment at lsu_etrna (rare; safeguard
-            §31.8 then demotes the chain to unmapped_rna_chains)
+**/E        partial-tRNA at lsu_etrna — the chain is shorter than
+            30 nt and doesn't contact the SSU exit-site anchor, but
+            the §11.5 picker already required a ≤cutoff contact at
+            the LSU E-site, so the assignment is preserved (e.g.
+            7Q0R chain 10: 14 modeled residues out of a 76-nt entity,
+            2.9 Å from the canonical LSU E anchors)
 ```
 
 If no E-tRNA is assigned:
@@ -4004,11 +4008,18 @@ A state of `**/**` would mean a chain shorter than 30 nt that makes
 no anchor contact on either subunit. The §11.2–§11.5 / §11.6
 assignment passes require a ≤cutoff anchor contact for any role, so
 this state shouldn't appear from a normal run. A defensive
-post-processing step in `api._demote_no_contact_fragments` checks
-each assigned tRNA's state after `compute_trna_states` and demotes
-to `unmapped_rna_chains` any chain whose state begins with `**/` and
-ends with `**` (i.e. `**/**`), and any E-tRNA whose state begins
-with `**/`.
+post-processing step in `api._demote_no_contact_fragments` demotes
+to `unmapped_rna_chains` any **A-tRNA or P-tRNA** whose state is
+exactly `**/**`.
+
+E-tRNA is **not** subject to this safeguard: its §11.5 picker
+already requires a ≤cutoff contact at the LSU E-site (or, for
+isolated_ssu topology, at the SSU exit-site), so a state like `**/E`
+represents a real partial-tRNA bound at the E-site — for example
+7Q0R chain 10, which has only 14 of its 76 entity-length residues
+modelled but sits 2.9 Å from the canonical LSU E anchors. Demoting
+on the SSU half-state alone would erase legitimate partial-tRNA
+assignments.
 
 The check guards against hand-crafted `ChainAssignments` (used in
 unit tests) and any future code path that bypasses the contact
