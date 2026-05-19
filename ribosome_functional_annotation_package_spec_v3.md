@@ -4379,3 +4379,148 @@ Examples produced by the new code:
   classified as archaeal and skipped with
   `archaeal_ribosome_not_supported` per §7.2 (archaea are still out of
   scope for v1).
+
+## 34. Per-assembly taxonomy aggregation
+
+### 34.1 Goal
+
+Surface a single NCBI taxonomy lineage per biological assembly so
+downstream consumers can filter ribosome annotations by clade (e.g.
+"all gammaproteobacterial 70S deposits", "all kinetoplastid
+mitoribosomes", "everything fungal but not Saccharomycetales") without
+re-querying RCSB or fetching the NCBI Taxonomy dump separately.
+
+### 34.2 Data source
+
+RCSB's GraphQL `rcsb_entity_source_organism.taxonomy_lineage` exposes
+each polymer entity's full NCBI lineage as a flat array of
+`{id, name, depth}` triples. Synonyms inflate the array (E. coli's
+`Bacteria` node returns 7 rows; the depth-4 phylum returns 7 more);
+the parser dedups on `tax_id` keeping the first canonical name per id
+and stores the result as `ChainRef.taxonomy_lineage: tuple[TaxonNode, ...]`
+ordered root→leaf.
+
+### 34.3 Voting set
+
+**Only rRNA chains vote** — the union of `ssu_main_rrna`,
+`lsu_main_rrna`, and `lsu_associated_rrna` after §6.1 partitioning.
+tRNAs, mRNAs, and bound factors are excluded because heterologous
+in-vitro reconstitutions routinely mix ribosomes from one organism
+with tRNAs from another (e.g. E. coli ribosome + yeast tRNA-Phe).
+Chains without a `taxonomy_lineage` are silently skipped.
+
+If the voting set is empty after that filter (synthetic-construct rRNA
+or RCSB doesn't return a lineage), the function returns `None` and
+the caller emits the `no_source_organism_taxonomy` warning.
+
+### 34.4 Aggregation algorithm — hybrid strict-LCA + majority-mode
+
+Walk the lineages depth-by-depth from root (depth 1 = `cellular
+organisms`):
+
+1. **Strict phase**. For each depth `d`, gather the `tax_id` from every
+   voting chain at that depth. If all chains share a single `tax_id`,
+   append that node to the consensus and continue. Set
+   `strict_lca_depth = d`.
+2. **Disagreement**. When a depth has more than one `tax_id` (or any
+   chain ran out of lineage), enter the majority phase.
+3. **Majority phase**. Filter voting chains to those whose
+   depth-`strict_lca_depth` node matches the last strict pick — i.e.
+   only chains rooted in the strict-LCA subtree get to vote at deeper
+   levels. At each subsequent depth take the mode `tax_id` among the
+   remaining chains; then narrow the eligible chains again to those
+   that voted for the winning `tax_id`. This guarantees the returned
+   lineage is a valid root-to-leaf path through the NCBI tree (mode
+   picks are always children of the previous pick).
+4. **Termination**. Stop when no remaining chain extends to the
+   current depth.
+
+When all voting chains share the same full lineage,
+`strict_lca_depth == lineage[-1].depth` and `is_mixed = False`. Any
+chain disagreement at any depth sets `is_mixed = True`.
+
+### 34.5 Output schema
+
+```python
+class TaxonNode(BaseModel):
+    tax_id: int
+    name: str       # canonical NCBI scientific name
+    depth: int      # NCBI's own depth (1 = "cellular organisms")
+
+class OrganismRef(BaseModel):
+    tax_id: int | None
+    scientific_name: str | None
+
+class AssemblyTaxonomy(BaseModel):
+    lineage: tuple[TaxonNode, ...]
+    domain: str | None                       # "Bacteria" / "Eukaryota" / "Archaea" / "Viruses"
+    species: str | None
+    voting_chains: tuple[str, ...]           # rRNA IFEs that voted
+    n_voting_chains: int
+    strict_lca_depth: int                    # last fully-agreed depth
+    is_mixed: bool
+    source_organisms: tuple[OrganismRef, ...]  # all chains, including non-voting
+```
+
+`RibosomeAnnotation.assembly_taxonomy: AssemblyTaxonomy | None`. `None`
+for skip annotations and for assemblies whose rRNA chains all lack a
+source-organism record.
+
+### 34.6 Domain detection
+
+`AssemblyTaxonomy.domain` resolves by matching the consensus lineage
+against the fixed map `{2: "Bacteria", 2157: "Archaea", 2759:
+"Eukaryota", 10239: "Viruses"}`. The match runs against `tax_id`, not
+`name`, so synonym variations don't break it. Domain is `None` only
+for cross-domain chimeras (essentially never seen in deposit data).
+
+### 34.7 Species detection
+
+`AssemblyTaxonomy.species` picks the deepest node whose canonical
+`name` looks like a binomial (`Genus species`). NCBI doesn't tag
+species with a stable rank label in `taxonomy_lineage`, so the
+heuristic is: walk the consensus leaf→root, return the first node
+with a space in its name that isn't the domain name. Falls back to
+the leaf node when no name matches.
+
+### 34.8 Output channel
+
+`AssemblyTaxonomy` is **JSON-only** — it appears in
+`RibosomeAnnotation.assembly_taxonomy` for the JSON / JSONL emitters
+and is not mirrored in either CSV. The lineage is a structured tuple
+of `TaxonNode`s; flattening it into a string column loses the
+per-node `tax_id` (required for cross-deposit filtering) and bloats
+the CSV row. Consumers that need taxonomy should read the typed JSON
+object directly.
+
+This keeps the chain-level CSV byte-for-byte compatible with the
+legacy prototype (§15.3) and keeps the assembly-level CSV's
+key/value layout free of high-cardinality lineage strings.
+
+### 34.9 Multi-ribosome bundles
+
+Each split annotation (`assembly_id=1-1`, `1-2`, …) aggregates
+independently using its own per-ribosome rRNA chain set. The split
+boundary is geometric (§31.1), so each sub-ribosome carries the
+correct rRNA chains for its own taxonomy vote.
+
+### 34.10 Worked examples
+
+- **5J7L (E. coli 70S)**. 3 rRNA chains all tagged `Escherichia coli
+  K-12` (tax_id 83333). Strict-LCA reaches depth 10 (strain),
+  `is_mixed=False`. `domain="Bacteria"`, `species="Escherichia coli
+  K-12"`, full 10-node lineage.
+- **7Q0R (C. albicans 80S)**. 4 rRNA chains (18S + 25S + 5.8S + 5S)
+  all tagged `Candida albicans SC5314`. Strict-LCA reaches depth 15,
+  `is_mixed=False`. `domain="Eukaryota"`, `species="Candida albicans
+  SC5314"`.
+- **9B0S (human cytoplasmic diribosome)**. After §31.1 split into
+  `1-1` and `1-2`, each sub-ribosome's 4 rRNA chains are tagged `Homo
+  sapiens`. Both annotations get `domain="Eukaryota"`,
+  `species="Homo sapiens"`, full 31-node lineage,
+  `is_mixed=False`.
+- **7QI5 (human 55S mitoribosome)**. mt-12S + mt-16S both tagged
+  `Homo sapiens` (NCBI doesn't separate mitochondrial-encoded rRNA
+  from the host). `domain="Eukaryota"`, `species="Homo sapiens"`,
+  consistent with cytoplasmic deposits — the mitochondrial origin is
+  surfaced by `ribosome_classification`, not the lineage.

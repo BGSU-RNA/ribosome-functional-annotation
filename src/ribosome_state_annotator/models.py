@@ -51,6 +51,21 @@ RibosomeTopology = Literal["complete", "isolated_ssu", "isolated_lsu"]
   State strings render the SSU half as ``-``."""
 
 
+class TaxonNode(BaseModel):
+    """One node of an NCBI taxonomy lineage (spec §34).
+
+    RCSB's ``rcsb_entity_source_organism.taxonomy_lineage`` returns a flat
+    array of ``{id, name, depth}`` triples, with synonyms duplicated at
+    the same depth/id. We dedup on ``tax_id`` at parse time keeping the
+    first (canonical) name per id, so a chain's lineage is a tuple of
+    unique nodes ordered root→leaf.
+    """
+
+    tax_id: int
+    name: str
+    depth: int
+
+
 class ChainRef(BaseModel):
     """A single polymer chain in a biological assembly.
 
@@ -73,6 +88,10 @@ class ChainRef(BaseModel):
     tax_id: int | None = None
     scientific_name: str | None = None
     superkingdom: str | None = None
+    # Full NCBI lineage root→leaf, deduplicated on tax_id. Empty tuple
+    # when the chain has no source-organism record (synthetic constructs).
+    # Spec §34.
+    taxonomy_lineage: tuple[TaxonNode, ...] = ()
     # First non-null UniProt protein name (when available). Required for the
     # §8.4 voting-eligibility rule, which checks both ``description`` and
     # ``uniprot_name`` for the "ribosomal protein" substring.
@@ -240,6 +259,65 @@ class CorrespondenceResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class OrganismRef(BaseModel):
+    """Compact (tax_id, scientific_name) reference for an assembly's
+    source organisms. Used by :class:`AssemblyTaxonomy.source_organisms`
+    to record every distinct organism seen across *all* chains in the
+    assembly (rRNA, protein, tRNA, mRNA, factor) — voting only happens
+    over rRNA but everything is reported for visibility.
+    """
+
+    tax_id: int | None
+    scientific_name: str | None
+
+
+class AssemblyTaxonomy(BaseModel):
+    """Per-assembly aggregated NCBI taxonomy (spec §34).
+
+    Voting set: rRNA chains only (``ssu_main_rrna``, ``lsu_main_rrna``,
+    ``lsu_associated_rrna``). tRNAs, mRNAs, and bound factors are
+    excluded from voting because heterologous in-vitro reconstitutions
+    routinely mix ribosomes from one organism with tRNAs from another.
+
+    Aggregation: hybrid strict-LCA → majority-mode-constrained-to-branch.
+    Walk the lineage root→leaf; while every voting chain shares the same
+    ``tax_id`` at the current depth, append it as a "strict" node. As
+    soon as chains disagree, switch to majority-mode but constrain
+    subsequent choices to descendants of the last strict node — this
+    guarantees the returned ``lineage`` is a valid root-to-leaf path
+    through the NCBI tree.
+
+    ``strict_lca_depth`` records the last depth at which every chain
+    agreed; any deeper nodes in ``lineage`` are majority-mode picks.
+    """
+
+    lineage: tuple[TaxonNode, ...]
+    domain: str | None = None
+    """Convenience: the NCBI domain (Bacteria / Eukaryota / Archaea /
+    Viruses) — equivalent to ``superkingdom``. Drawn from ``lineage``;
+    falls back to ``None`` if strict-LCA didn't reach a domain (only
+    happens for cross-domain chimeras, which essentially don't exist)."""
+    species: str | None = None
+    """Convenience: the species-rank node when the lineage resolved to
+    species (depth ≥ species-rank depth for the relevant domain). Falls
+    back to the leaf of ``lineage`` for unranked deep nodes."""
+    voting_chains: tuple[str, ...] = ()
+    """IFEs of the rRNA chains that voted (those with non-empty
+    ``taxonomy_lineage``)."""
+    n_voting_chains: int = 0
+    strict_lca_depth: int = 0
+    """Greatest depth at which all voting chains shared the same node.
+    Equal to ``len(lineage)`` when every chain agrees all the way to the
+    leaf (``is_mixed=False``)."""
+    is_mixed: bool = False
+    """True when at least one depth in ``lineage`` was decided by
+    majority-mode (i.e. the voting chains disagreed at some depth)."""
+    source_organisms: tuple[OrganismRef, ...] = ()
+    """Every unique (tax_id, scientific_name) seen across *all* chains
+    in the assembly, including non-voting ones (tRNAs, factors, etc.).
+    Synthetic constructs surface as ``(None, None)``."""
+
+
 class RibosomeAnnotation(BaseModel):
     """Final annotation result for one biological assembly (spec §9.1).
 
@@ -287,6 +365,10 @@ class RibosomeAnnotation(BaseModel):
 
     non_ribosomal_proteins: list[ChainRef] = Field(default_factory=list)
     bound_ligands: list[LigandRef] = Field(default_factory=list)
+    # Per-assembly aggregated NCBI taxonomy (spec §34). ``None`` for
+    # skip annotations and for assemblies whose rRNA chains all lack a
+    # source-organism record.
+    assembly_taxonomy: AssemblyTaxonomy | None = None
     # RADdb-derived inter-subunit rotation + SSU head rotation (raddb spec).
     # Always emitted (with null metrics) for annotated assemblies so the
     # output schema stays stable whether RADdb is reachable or not.

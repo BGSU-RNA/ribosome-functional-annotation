@@ -152,6 +152,29 @@ def test_chain_csv_header_matches_spec_15_3_order() -> None:
     assert header_line == expected
 
 
+def test_assembly_taxonomy_not_mirrored_in_csv() -> None:
+    """Spec §34 — ``AssemblyTaxonomy`` is JSON-only. The CSV outputs must
+    not gain taxonomy columns or rows even when the annotation carries a
+    populated ``assembly_taxonomy``."""
+    from ribosome_state_annotator.models import AssemblyTaxonomy, TaxonNode
+
+    ann = _bacterial_annotated()
+    ann.assembly_taxonomy = AssemblyTaxonomy(
+        lineage=(TaxonNode(tax_id=83333, name="Escherichia coli K-12", depth=10),),
+        domain="Bacteria",
+        species="Escherichia coli K-12",
+    )
+    chain_row = output.chain_csv_row(ann)
+    assert "taxonomy_domain" not in chain_row
+    assert "taxonomy_species" not in chain_row
+    assert "taxonomy_lineage" not in chain_row
+    properties = {r["property"] for r in output.assembly_csv_rows(ann)}
+    assert "taxonomy_domain" not in properties
+    assert "taxonomy_species" not in properties
+    assert "taxonomy_lineage" not in properties
+    assert "taxonomy_is_mixed" not in properties
+
+
 def test_chain_csv_row_has_ife_strings_for_bacterial() -> None:
     row = output.chain_csv_row(_bacterial_annotated())
     assert row["pdb_id"] == "5J7L"

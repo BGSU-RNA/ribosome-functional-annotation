@@ -96,7 +96,10 @@ CHAIN_CSV_FIELDS: tuple[str, ...] = (
 )
 """Legacy chain-level CSV columns in the prototype's exact order. Do not
 reorder — :file:`tests/fixtures/legacy_csv/ribosome_chain_annotation.csv`
-is the v1 contract."""
+is the v1 contract. ``AssemblyTaxonomy`` (§34) is JSON-only — not
+mirrored in the CSV — so downstream consumers can read it from the
+typed ``RibosomeAnnotation.assembly_taxonomy`` object rather than
+parsing back a flattened string."""
 
 
 def _ife_or_empty(chain: ChainRef | None) -> str:
@@ -239,6 +242,8 @@ def assembly_csv_rows(annotation: RibosomeAnnotation) -> list[dict[str, str]]:
     dominant = annotation.classification_evidence.get("dominant_ribosomal_protein_superkingdom")
     if isinstance(dominant, str) and dominant:
         rows.append(_row("", "dominant_superkingdom", dominant))
+
+    # ``AssemblyTaxonomy`` (§34) is JSON-only — not mirrored in the CSV.
 
     return rows
 

@@ -93,6 +93,7 @@ from ribosome_state_annotator.rcsb_client import (
     fetch_entry_payload,
     parse_assemblies,
 )
+from ribosome_state_annotator.taxonomy import aggregate_assembly_lineage
 from ribosome_state_annotator.rfam_pdb_region import (
     RfamPdbRegionDataset,
     ensure_rfam_pdb_region_available,
@@ -971,6 +972,18 @@ def _build_annotated_annotation(
         warnings=warnings,
     )
 
+    # Per-assembly NCBI taxonomy (§34). Vote with rRNA chains only; if
+    # none of them carries a lineage tag emit the dedicated warning.
+    voting_rrna = (
+        list(by_role.get("ssu_main_rrna", []))
+        + list(by_role.get("lsu_main_rrna", []))
+        + list(by_role.get("lsu_associated_rrna", []))
+    )
+    all_chains = list(assembly.rna_chains) + list(assembly.protein_chains)
+    assembly_taxonomy = aggregate_assembly_lineage(voting_rrna, all_chains=all_chains)
+    if assembly_taxonomy is None and voting_rrna:
+        warnings.append("no_source_organism_taxonomy")
+
     return RibosomeAnnotation(
         pdb_id=assembly.pdb_id,
         assembly_id=assembly.assembly_id,
@@ -991,6 +1004,7 @@ def _build_annotated_annotation(
         non_ribosomal_proteins=non_ribosomal_proteins,
         bound_ligands=bound_ligands,
         large_scale_movements=large_scale_movements,
+        assembly_taxonomy=assembly_taxonomy,
         classification_evidence={
             **classification_result.evidence,
             **states.trna_state_evidence,

@@ -145,6 +145,17 @@ package leverages this conservation through a four-stage pipeline:
    the fragment/displaced placeholders described above), and an
    additional neighbour search around the A- or P-tRNA's CCA end
    identifies any bound elongation, release, or initiation factor.
+6. **Aggregate taxonomy.** RCSB's
+   `rcsb_entity_source_organism.taxonomy_lineage` gives a full NCBI
+   lineage per polymer entity. The package votes across the
+   assembly's rRNA chains only — tRNAs, mRNAs, and bound factors are
+   excluded because heterologous reconstitutions mix organisms — and
+   returns a single consensus `AssemblyTaxonomy` per ribosome:
+   strict-LCA where every rRNA chain agrees, then majority-mode
+   constrained to that subtree for any deeper depths. The output
+   includes `domain` (Bacteria / Eukaryota / Archaea), `species`,
+   the full lineage, and an `is_mixed` flag for non-monoclonal
+   assemblies.
 
 This **contact-transfer annotation** workflow transfers functional
 identity through three-dimensional contacts to conserved positions,
@@ -364,6 +375,11 @@ write_chain_csv(annotations, Path("chain.csv"))
 | JSONL | `--output foo.jsonl` | One annotation per line; intended for streaming consumers. |
 | `ribosome_chain_annotation.csv` | Default companion (suppressed by `--no-csv`) | One row per annotated ribosome (one row per assembly for single-ribosome cases; one row per sub-ribosome for multi-ribosome bundles) across 13 columns. Matches the legacy prototype byte-for-byte. |
 | `ribosome_assembly_annotation.csv` | Default companion | One row per `(property, value)` tuple: species, non-ribosomal proteins, bound ligands, unmapped RNA chains, plus v1 extensions (classification, superkingdom). Warnings are not written to CSV; they remain in the JSON output and the live log stream. |
+
+`AssemblyTaxonomy` (per-assembly NCBI lineage, §34) is emitted in the
+JSON / JSONL outputs only — read it from
+`RibosomeAnnotation.assembly_taxonomy`. The CSV stays focused on
+chain-identity and functional state.
 
 Skipped and failed annotations appear in the JSON output but are
 omitted from the CSV files.

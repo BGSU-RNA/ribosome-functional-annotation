@@ -27,7 +27,7 @@ import httpx
 
 from ribosome_state_annotator.classify import matches_ribosomal_protein_narrow
 from ribosome_state_annotator.exceptions import ApiRequestError
-from ribosome_state_annotator.models import AssemblyContext, ChainRef, LigandRef
+from ribosome_state_annotator.models import AssemblyContext, ChainRef, LigandRef, TaxonNode
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,11 @@ query RibosomeEntry($entry_id: String!) {
             ncbi_taxonomy_id
             ncbi_scientific_name
             ncbi_parent_scientific_name
+            taxonomy_lineage {
+              id
+              name
+              depth
+            }
           }
           uniprots {
             rcsb_uniprot_protein { name { value } }
@@ -290,6 +295,7 @@ def _parse_polymer_instance(
     tax_id = _first_non_null_int(source_list, "ncbi_taxonomy_id")
     scientific_name = _first_non_null_str(source_list, "ncbi_scientific_name")
     superkingdom = _first_non_null_str(source_list, "ncbi_parent_scientific_name")
+    taxonomy_lineage = _extract_taxonomy_lineage(source_list)
 
     uniprot_name = _extract_first_uniprot_name(entity.get("uniprots"))
     is_ribosomal = matches_ribosomal_protein_narrow(description, uniprot_name)
@@ -306,6 +312,7 @@ def _parse_polymer_instance(
         tax_id=tax_id,
         scientific_name=scientific_name,
         superkingdom=superkingdom,
+        taxonomy_lineage=taxonomy_lineage,
         uniprot_name=uniprot_name,
         is_ribosomal_protein=is_ribosomal,
     )
@@ -405,3 +412,53 @@ def _extract_first_uniprot_name(uniprots: Any) -> str | None:
         if name:
             return name
     return None
+
+
+def _extract_taxonomy_lineage(source_list: list[Any]) -> tuple[TaxonNode, ...]:
+    """Build an ordered, dedup-by-``tax_id`` lineage tuple for one chain.
+
+    RCSB attaches ``taxonomy_lineage`` per ``rcsb_entity_source_organism``
+    entry. The array carries one row per (depth, name) — multiple rows
+    share the same ``id`` because NCBI keeps synonyms (e.g. E. coli's
+    `Bacteria` node returns 7 rows: "Bacteria", "Bacteria (ex
+    Cavalier-Smith 1987)", "bacteria", "eubacteria", …). We dedup on
+    ``id`` keeping the first occurrence per id (RCSB returns the
+    canonical name first), preserving the root→leaf order.
+
+    Most polymer entities have a single source organism; if more than
+    one is present we use the first non-empty lineage — chimeric entities
+    are extremely rare and the §34 voting aggregator handles cross-chain
+    disagreement separately.
+    """
+    if not isinstance(source_list, list):
+        return ()
+    for source in source_list:
+        if not isinstance(source, dict):
+            continue
+        raw_lineage = source.get("taxonomy_lineage")
+        if not isinstance(raw_lineage, list):
+            continue
+        nodes: list[TaxonNode] = []
+        seen_ids: set[int] = set()
+        for row in raw_lineage:
+            if not isinstance(row, dict):
+                continue
+            try:
+                tax_id_int = int(row["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if tax_id_int in seen_ids:
+                continue
+            name = _str_or_none(row.get("name"))
+            if name is None:
+                continue
+            depth = row.get("depth")
+            try:
+                depth_int = int(depth) if depth is not None else len(nodes) + 1
+            except (TypeError, ValueError):
+                depth_int = len(nodes) + 1
+            nodes.append(TaxonNode(tax_id=tax_id_int, name=name, depth=depth_int))
+            seen_ids.add(tax_id_int)
+        if nodes:
+            return tuple(nodes)
+    return ()
