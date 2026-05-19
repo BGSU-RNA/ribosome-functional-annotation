@@ -827,7 +827,7 @@ Use this rule in v1:
 if ribosome_classification == bacterial_ribosome:
     reference_units = ECOLI_REFERENCE_UNITS
 elif ribosome_classification == eukaryotic_organellar_ribosome:
-    reference_units = ECOLI_REFERENCE_UNITS
+    reference_units = ECOLI_REFERENCE_UNITS_ORGANELLAR   # see §31.4
 elif ribosome_classification == eukaryotic_ribosome:
     reference_units = YEAST_REFERENCE_UNITS
 else:
@@ -838,7 +838,13 @@ Rationale:
 
 - bacterial ribosomes use bacterial-like rRNA site references;
 - eukaryotic cytoplasmic ribosomes use yeast-like rRNA site references;
-- eukaryotic organellar ribosomes are initially treated as bacterial-like for reference-site mapping because their rRNA core is generally bacterial-derived, even though their protein taxonomy is eukaryotic.
+- eukaryotic organellar ribosomes use a **filtered** variant of the
+  E. coli reference set (§31.4) — four anchors are removed because the
+  corresponding E. coli residues have no mt-rRNA equivalent and trigger
+  BGSU's intersection-semantic to drop every mt deposit from a batched
+  response. BGSU's structural alignment cross-walks the remaining 16
+  anchors onto mt-12S / mt-16S residues in any deposit's native
+  numbering.
 
 ## 7. Complete ribosome validation
 
@@ -904,6 +910,24 @@ If only SSU or only LSU is detected, skip with:
   "skip_reason": "partial_ribosome_missing_ssu_or_lsu"
 }
 ```
+
+If both SSU and LSU rRNA roles are present but with **asymmetric chain
+counts** (e.g. 1 SSU chain + 3 LSU chains, as in Tetrahymena /
+Chlamydomonas chloroplast / fragmented human mitoribosome deposits
+where the 28S or 23S rRNA is biologically cleaved into multiple
+chains), skip with:
+
+```json
+{
+  "status": "skipped",
+  "skip_reason": "fragmented_ribosome_not_supported"
+}
+```
+
+Matched-count multi-chain assemblies (`n_ssu == n_lsu >= 2`) are
+**not** fragmented — they are di-ribosomes / in-situ polysomes and
+are split into per-ribosome sub-contexts (§31.1) rather than skipped.
+The fragmented-skip is `(n_ssu >= 2 OR n_lsu >= 2) AND n_ssu != n_lsu`.
 
 If both SSU and LSU are present but ribosomal protein content is too low, emit a warning or skip depending on strictness mode:
 
@@ -1001,8 +1025,24 @@ rrna_core = "mixed"           if bacterial_like AND eukaryotic_like are both tru
 rrna_core = "ambiguous"       otherwise
 ```
 
-`"mixed"` → treat as `"bacterial_like"` for §8.3 purposes and emit warning
-`mixed_rrna_core_treated_as_bacterial_like`.
+`"mixed"` → resolve via the dominant protein-superkingdom vote
+(§31.5). The resolution is deferred until §8.3 has computed
+`dominant_sk`, then:
+
+- `dominant_sk == "Eukaryota"` → `rrna_core := "eukaryotic_like"`
+- otherwise → `rrna_core := "bacterial_like"`
+
+Emit warning `mixed_rrna_core_resolved_via_protein_vote` and write
+`rrna_core_resolved` into the classification evidence dict.
+
+This replaces the v3.0 behaviour of always demoting MIXED to
+`"bacterial_like"`. Discovered empirically: PDBe's HMM-based Rfam
+mapping over-annotates eukaryotic 80S rRNA chains with bacterial
+*and* eukaryotic Rfam families simultaneously (e.g. 9B0S has the 18S
+rRNA tagged with RF00177 + RF01959 + RF01960 and the 28S with
+RF02540 + RF02541 + RF02543). The always-bacterial demotion routed
+those entries into `eukaryotic_organellar_ribosome`; the protein-vote
+resolution correctly puts them into `eukaryotic_ribosome` instead.
 
 `"ambiguous"` → skip the assembly with
 `skip_reason="ambiguous_rrna_core"`.
@@ -1415,6 +1455,16 @@ Find RNA chains neighbouring the mapped `ssu_mrna` reference site. Exclude SSU/L
 > Discovered empirically on 6Y57: without this filter, the P/E hybrid
 > tRNA `B4` was selected as mRNA because it contacted the SSU mRNA
 > anchor before the real mRNA chain `A4`.
+>
+> **v3.2 extension — description-based fallback (§31.6).** Some
+> deposits omit the `RF00005` Rfam annotation on tRNA chains (notably
+> mitoribosome A/A-tRNAs like 7QI5 chain Aw, and the synthetic
+> CCA-end tRNA analogs in 7RQA / 8T8C). To catch these, any chain
+> whose `description` contains the substring `"tRNA"`
+> (case-insensitive) is *also* excluded from the mRNA candidate pool.
+> The risk of a false-positive (an mRNA labelled "tRNA-binding-site
+> mimic") is acceptable because mRNA assignment then just skips and
+> the chain falls into `other_rna_chains`.
 
 ### 11.3 P-site tRNA assignment
 
@@ -1427,6 +1477,17 @@ Find RNA chains neighbouring the mapped `ssu_atrna` reference site. Exclude core
 ### 11.5 E-site tRNA assignment
 
 Find RNA chains neighbouring the mapped `lsu_etrna` reference site. Exclude core rRNAs and assigned P-site tRNA. If the only candidate is the P-site tRNA, do not assign an independent E-site tRNA.
+
+### 11.6 LSU-based fallback for A and P (v3.2)
+
+After the canonical SSU-anchor pass above (§11.2–§11.5) finishes, any
+A or P slot that is still empty is filled by a closer-LSU-site
+fallback using `lsu_atrna` / `lsu_ptrna` proximity. See §31.2 for the
+full algorithm. The fallback recovers tRNA analogs that engage only
+the PTC (CCA-end fragments in 7RQA, 8T8C), pre-accommodation full
+tRNAs whose acceptor end sits at the PTC before anticodon-mRNA
+pairing (3JAG, 7O7Z, 7OSM, 7UG7), and mitoribosome P-tRNAs whose SSU
+contact is displaced (8OIR P-Met-tRNA).
 
 ## 12. tRNA state inference
 
@@ -1441,22 +1502,33 @@ For assigned A-tRNA:
   - `ssu_ptrna`
   - `lsu_ptrna`
 
-Rules:
+Rules (v3.2):
 
 ```text
 SSU state:
-- if A-tRNA contacts SSU P-site reference nts: ap
-- else: A
+- if contacts SSU A-site AND contacts SSU P-site: ap
+- if contacts SSU A-site only:                    A
+- if contacts neither (LSU-fallback assignment, §11.6):
+    - if chain length < 30: **
+    - else:                  *
 
 LSU state:
-- if contacts LSU A-site and LSU P-site: AP
-- if contacts LSU A-site only: A
-- if contacts LSU P-site only: P
+- if contacts LSU A-site AND LSU P-site:          AP
+- if contacts LSU A-site only:                    A
+- if contacts LSU P-site only:                    P
 - if contacts neither:
     - if chain length < 30: **
     - else compute the protein-factor LSU label (see §12.4);
       if none found, use *
 ```
+
+The `*` / `**` distinction is symmetric: `**` always means "chain
+shorter than 30 nt, physically cannot reach this subunit", `*` always
+means "full-length polymer that doesn't make a canonical contact at
+this subunit" (positionally displaced, or no protein factor at CCA).
+See §31.7 for the rationale and the `**/**` safeguard (§31.8) that
+demotes a chain with no anchor contact on either side to
+`unmapped_rna_chains`.
 
 Final state:
 
@@ -1467,33 +1539,38 @@ Final state:
 Examples:
 
 ```text
-A/A
-A/P
-ap/AP
-A/*
-A/**
+A/A         canonical A site
+A/P         classical A on SSU, displaced toward P on LSU
+ap/AP       fully chimeric (translocation intermediate)
+A/*         no LSU contact, no factor
+A/**        ASL fragment (no LSU contact, chain < 30 nt)
+*/AP        full-length pre-accommodation A-tRNA at PTC (3JAG, 7O7Z)
+**/A        CCA-end-only tRNA analog at PTC A-site (7RQA)
 ```
 
 ### 12.2 P-site / peptidyl tRNA
 
 For assigned P-tRNA:
 
-- Check whether it contacts `lsu_ptrna` site.
+- Check whether it contacts `ssu_ptrna` site.
 - Check whether it contacts neighbouring E-site reference regions:
   - `ssu_etrna`
   - `lsu_etrna`
 
-Rules:
+Rules (v3.2):
 
 ```text
 SSU state:
-- if P-tRNA contacts SSU E-site reference nts: pe
-- else: P
+- if contacts SSU P-site AND contacts SSU E-site: pe
+- if contacts SSU P-site only:                    P
+- if contacts neither (LSU-fallback assignment, §11.6):
+    - if chain length < 30: **
+    - else:                  *
 
 LSU state:
-- if contacts LSU P-site and LSU E-site: PE
-- if contacts LSU P-site only: P
-- if contacts LSU E-site only: E
+- if contacts LSU P-site AND LSU E-site:          PE
+- if contacts LSU P-site only:                    P
+- if contacts LSU E-site only:                    E
 - if contacts neither:
     - if chain length < 30: **
     - else compute the protein-factor LSU label (see §12.4);
@@ -1514,14 +1591,40 @@ P/E
 pe/PE
 P/*
 P/**
+*/P         CCA-end tRNA analog at PTC P-site (7RQA chain 1x)
+**/P        same, when chain < 30 nt
 ```
 
 ### 12.3 E-site / exit tRNA
 
-For assigned E-tRNA:
+For assigned E-tRNA, the LSU state is always `E` because assignment
+itself was made by `lsu_etrna` contact. The SSU side uses the same
+fragment-vs-displaced convention as A- and P-tRNA:
 
 ```text
-E/E
+SSU state:
+- if contacts SSU E-site:                E
+- if contacts neither SSU E nor P:
+    - if chain length < 30: **
+    - else:                  *
+
+LSU state: always E (assignment is by lsu_etrna contact)
+```
+
+Final state:
+
+```text
+<SSU state>/E
+```
+
+Examples:
+
+```text
+E/E         canonical E site
+*/E         full polymer at LSU E only (mitoribosome E-tRNA where the
+            mt-12S exit-site anchor is filtered out, §31.4)
+**/E        CCA-tripeptide fragment at lsu_etrna (rare; safeguard
+            §31.8 then demotes the chain to unmapped_rna_chains)
 ```
 
 If no E-tRNA is assigned:
@@ -3610,3 +3713,342 @@ Coverage requirements:
 See `REFERENCES.md` for the FR3D citation (Sarver et al. 2008) and
 the Leontis-Westhof base-pair geometric nomenclature (2001).
 
+
+## 31. v3.2 robustness and edge-case extensions
+
+This section collects the v3.2 design extensions that emerged from
+running the package on a random 200-PDB sample. Each subsection
+describes one extension; the in-place updates in earlier sections
+(§6.4, §7.4, §8.2, §11.2, §11.6, §12) reference back here.
+
+### 31.1 Multi-ribosome bundle splitting
+
+**Problem.** Some deposits pack two complete ribosomes into a single
+biological assembly — Mycobacterium 70S di-ribosomes (8R3V, 8RCL),
+plant bacterial dimers (9GFT, 9O3L), CCA-end-fragment dimers (8T8C),
+in-situ human di-ribosomes (9B0S). The classification truth table
+(§8) and the per-assembly contact-transfer (§11) treat the whole
+bundle as one ribosome, filling only one A/P/E set and leaving the
+second ribosome's tRNAs in `other_rna_chains`.
+
+**Detection.** A multi-ribosome bundle is defined by:
+
+```text
+n_ssu := len(by_role["ssu_main_rrna"])
+n_lsu := len(by_role["lsu_main_rrna"])
+
+is_multi_ribosome := (n_ssu >= 2) AND (n_lsu >= 2) AND (n_ssu == n_lsu)
+```
+
+The equal-counts requirement distinguishes a multi-ribosome bundle
+from a fragmented-LSU deposit (§7.4 / §31.3) where `n_ssu != n_lsu`.
+
+**Pairing rule (greedy nearest-centroid).** For each SSU and LSU
+chain, compute the centroid of all atom positions. Greedily pair the
+SSU↔LSU pair with the smallest centroid distance, remove both from
+contention, repeat. The result is a deterministic list of
+`(ssu_chain, lsu_chain)` pairs whose length equals
+`min(n_ssu, n_lsu)`.
+
+The greedy rule is robust for the cases observed because the two
+ribosomes' centroids are typically 100–200 Å apart while
+within-ribosome SSU↔LSU centroid distance is ~50 Å — the "right"
+pairings beat the "wrong" cross-pairings by an order of magnitude.
+
+**Partitioning other chains.** Every non-main-rRNA chain (mRNA, tRNAs,
+5S/5.8S, non-ribosomal proteins) is assigned to the ribosome whose
+combined SSU+LSU centroid it is closest to. Each ribosome receives:
+
+- its paired SSU + LSU main rRNA chains;
+- the non-main-rRNA chains in its centroid partition;
+- the non-ribosomal protein chains in its centroid partition.
+
+**Per-ribosome correspondence.** BGSU's NR correspondence response
+typically returns mappings to **one** chain per PDB per equivalence
+class — the canonical NR representative (see the live-API behaviour
+documented in our examples to BGSU). For the bundle this means BGSU
+returns anchors only for ribosome 1's chains; ribosome 2's chains
+have no native mapping in the response. The package rebuilds a
+per-ribosome `CorrespondenceResult` by re-applying the §5.2.2
+chain-substitution fallback with the ribosome's own SSU/LSU chains as
+the substitution targets. For same-organism / same-numbering cases
+(all bacterial dimers in the test set) this produces valid anchors;
+for cross-organism cases (9B0S queried with yeast anchors) the
+substitution preserves the reference residue number which may not
+exist in the target chain — a limitation noted as a follow-up that
+resolves once BGSU returns all chain instances per PDB.
+
+**Output shape.** Each ribosome emits its own `RibosomeAnnotation`
+with a suffixed `assembly_id`:
+
+```text
+8R3V assembly 1 → annotations with assembly_id "1-1" and "1-2"
+```
+
+Single-ribosome assemblies (the 99% case) keep their plain
+`assembly_id`. A warning `multi_ribosome_bundle_split` is recorded on
+each sub-annotation. `annotate_assembly(pdb_id, "1-1")` retrieves a
+specific sub-ribosome; `annotate_assembly(pdb_id, "1")` returns the
+first sub-ribosome of the bundle for backward compatibility.
+
+**Module.** `src/ribosome_state_annotator/multiribo.py` owns the
+detection (`detect_multi_ribosome`), pairing
+(`pair_ssu_lsu_by_centroid`), and partitioning
+(`partition_chains_by_ribosome`).
+
+### 31.2 LSU-based A/P fallback
+
+**Problem.** The canonical SSU-anchor pass (§11.2–§11.4) misses two
+classes of tRNA:
+
+1. **CCA-end-only analogs.** Synthetic peptidyl-tRNA / aminoacyl-tRNA
+   mimics (~10–30 nt) that engage only the PTC and lack the anticodon
+   end. Examples: 7RQA chains 1w / 1x / 2w / 2x; 8T8C chains 1w / 1x.
+2. **Pre-accommodation full tRNAs.** Full-length tRNAs delivered into
+   the PTC before anticodon-codon pairing in the SSU decoding centre.
+   Examples: 3JAG chain 2 (tRNA-Val); 7O7Z chain AT; 7OSM chain ASIT;
+   7UG7 chain Pt.
+
+Both have strong PTC contacts (`lsu_atrna` 2–3 Å, `lsu_ptrna` 2–3 Å)
+but `ssu_atrna` / `ssu_ptrna` distances of 10–60 Å — outside the 5 Å
+cutoff.
+
+**Algorithm.** After the canonical SSU pass fills mRNA → P → A → E,
+collect each remaining candidate's distances to `lsu_atrna` and
+`lsu_ptrna`. For each candidate that contacts either site within
+`cutoff`:
+
+```text
+preferred_site := A if d(lsu_atrna) <= d(lsu_ptrna) else P
+```
+
+Process candidates in best-first order (smallest LSU contact first).
+For each:
+
+1. If the preferred site is still unfilled, assign the candidate there.
+2. Else if the alternative LSU site is still unfilled AND the
+   candidate also contacts that site within cutoff, assign there.
+3. Else skip.
+
+The closer-site-first ordering is essential: with strict A-before-P
+ordering, 8OIR's P-Met-tRNA (`lsu_atrna` 3.2 Å, `lsu_ptrna` 1.8 Å)
+would be mis-assigned to A because the A-fallback runs first.
+
+E-tRNA already uses LSU anchors (`lsu_etrna`) as its primary anchor
+in §11.5, so no separate E-tRNA fallback is needed.
+
+**Helper.** `infer._compute_chain_distances` returns the full
+`{chain_id: min_distance}` map for an anchor site; the fallback uses
+it twice (once each for `lsu_atrna` and `lsu_ptrna`) and combines.
+
+### 31.3 Fragmented-ribosome skip
+
+**Problem.** Some organisms biologically fragment their LSU rRNA into
+multiple chains: Tetrahymena (8OVA, 8OVJ, 8QHU, 8QIE, 8RXH),
+Chlamydomonas chloroplast (28JW, 28LU, 9TVU, 9HL9), some fragmented
+human mitoribosomes (7A5K). The deposit's `lsu_main_rrna` role
+collects all fragments (e.g. 1 SSU + 3 LSU). Canonical anchor
+residue numbers don't transfer onto fragments — each fragment uses
+its own per-fragment numbering, and BGSU's NR correspondence rarely
+covers these unusual rRNAs.
+
+**Detection and skip.** At the start of `_annotate_one_assembly`,
+after `partition_rna_chains_by_role` produces `by_role` and before
+the multi-ribo splitter:
+
+```text
+n_ssu := len(by_role["ssu_main_rrna"])
+n_lsu := len(by_role["lsu_main_rrna"])
+
+is_fragmented := (n_ssu >= 2 OR n_lsu >= 2) AND n_ssu != n_lsu
+```
+
+Skip with:
+
+```json
+{
+  "status": "skipped",
+  "skip_reason": "fragmented_ribosome_not_supported"
+}
+```
+
+An `INFO` log line `"fragmented ribosome detected for {pdb} assembly
+{aid} (SSU chains=N, LSU chains=M); skipping"` is emitted so batch
+runs surface the reason without forcing the caller to inspect each
+annotation.
+
+Multi-ribosome bundles (`n_ssu == n_lsu >= 2`) bypass this check
+because they're handled by §31.1.
+
+### 31.4 Filtered E. coli reference set for organellar
+
+**Problem.** Routing organellar classifications through the full
+`ECOLI_REFERENCE_UNITS` triggers BGSU's intersection semantic on
+batched correspondence queries — four E. coli anchors (`G|693`,
+`A|694`, `G|2112`, `G|2421`) have no mt-rRNA equivalent (residues in
+helices that mt-rRNA lost during reduction). Their inclusion in a
+batched query drops every mt deposit from the response.
+
+**Solution.** `ECOLI_REFERENCE_UNITS_ORGANELLAR` is the same as
+`ECOLI_REFERENCE_UNITS` minus those four anchors:
+
+| Site         | Anchors retained               | Anchors removed             |
+|--------------|--------------------------------|-----------------------------|
+| `ssu_mrna`   | G\|926, 4OC\|1402, C\|1403     | —                           |
+| `ssu_ptrna`  | G\|1338, A\|1339, C\|1400      | —                           |
+| `ssu_atrna`  | G\|530, A\|1492, A\|1493       | —                           |
+| `ssu_etrna`  | *(empty)*                      | G\|693, A\|694              |
+| `lsu_atrna`  | G\|2553, G\|2583, U\|2585      | —                           |
+| `lsu_ptrna`  | OMG\|2251, G\|2252, G\|2253    | —                           |
+| `lsu_etrna`  | C\|2422                        | G\|2112, G\|2421            |
+
+With the filtered set, BGSU's batched query returns mt mappings for
+all 16 remaining anchors across all known human / Toxoplasma /
+*spinach* / *Chlamydomonas* mitoribosome and chloroplast ribosome
+deposits in the sample, in each deposit's native residue numbering
+(8ANY-style 1557 / canonical 909 / 7A5G-style 1561, etc.) — BGSU's
+R3D structural alignment cross-walks correctly across both Rfam
+families and numbering schemes.
+
+The empty `ssu_etrna` site means the SSU E-site half-state for
+organellar P-tRNAs collapses (the `pe` SSU hybrid label cannot be
+detected); E-tRNA *assignment* (§11.5) is unaffected because it uses
+`lsu_etrna` only.
+
+### 31.5 MIXED rRNA-core resolution via protein vote
+
+**Problem.** PDBe's HMM-based Rfam mapping over-annotates some rRNA
+chains with multiple cross-family hits. 9B0S' 18S rRNA chain is
+tagged with RF00177 (bacterial 16S) + RF01959 (archaeal SSU) +
+RF01960 (eukaryotic 18S); its 28S has RF02540 (archaeal LSU) +
+RF02541 (bacterial 23S) + RF02543 (eukaryotic 28S). This triggers
+`determine_rrna_core` to return `"mixed"`. The v3.0 spec demoted
+MIXED to `"bacterial_like"` unconditionally, which combined with the
+Eukaryota protein vote routed 9B0S into
+`eukaryotic_organellar_ribosome` — the wrong classification (it's a
+human cytoplasmic 80S di-ribosome).
+
+**Resolution.** The MIXED demotion is delayed until after the §8.3
+protein vote and uses the dominant superkingdom:
+
+```python
+if rrna_core == RRNA_CORE_MIXED:
+    warnings.append("mixed_rrna_core_resolved_via_protein_vote")
+    rrna_core = (
+        RRNA_CORE_EUKARYOTIC
+        if dominant_sk == "Eukaryota"
+        else RRNA_CORE_BACTERIAL
+    )
+    evidence["rrna_core_resolved"] = rrna_core
+```
+
+True biological chimeras (e.g. synthetic hybrid ribosomes) are rare;
+PDBe over-annotation is the dominant cause in practice. The
+protein-vote-driven resolution handles the dominant case and the
+warning surfaces the MIXED detection for any consumer that needs to
+audit it.
+
+### 31.6 Description-based mRNA-pool exclusion
+
+**Problem.** Some deposits omit `RF00005` on tRNA chains despite the
+chain being a tRNA. Two patterns observed:
+
+- Mitoribosome A/A-tRNAs (e.g. 7QI5 chain Aw, labelled "A/A-tRNA"
+  with empty `rfam_accessions`).
+- Synthetic CCA-end tRNA analogs (e.g. 7RQA chains 1w/1x, labelled
+  "A-site Aminoacyl-tRNA Analog" with no Rfam tag).
+
+Without the `RF00005` tag, these chains enter the mRNA candidate
+pool and can win the mRNA slot via geometric proximity to the SSU
+mRNA anchors (which sit at the decoding-centre).
+
+**Fix.** Extend the §11.2 mRNA-pool exclusion to also drop any chain
+whose `description` contains the substring `"tRNA"`
+(case-insensitive). The check runs alongside the `RF00005` filter,
+before the per-pool ranking.
+
+```python
+def _looks_like_trna(chain: ChainRef) -> bool:
+    return "trna" in (chain.description or "").lower()
+
+mrna_candidates = [
+    c for c in candidate_pool
+    if c.ife not in trna_rfam_ifes and not _looks_like_trna(c)
+]
+```
+
+False-positive risk (an mRNA chain literally described as
+"tRNA-binding-site mimic") is acceptable: mRNA assignment then
+silently skips and the chain falls into `other_rna_chains`, where
+the consumer can re-inspect.
+
+### 31.7 Fragment-vs-displaced state vocabulary
+
+The half-state placeholders in §12 are unified across SSU and LSU
+sides with the following convention:
+
+| Symbol | Meaning |
+|--------|---------|
+| `A` / `P` / `E` | canonical contact at that site |
+| `AP` / `PE` | LSU hybrid (uppercase) |
+| `ap` / `pe` | SSU hybrid (lowercase) |
+| `*` | **full polymer (≥ 30 nt) but no canonical contact at this subunit** — positionally displaced (pre-accommodation A-tRNA, mt P-tRNA with displaced SSU contact, …) |
+| `**` | **chain shorter than 30 nt** — physically cannot reach this subunit (anticodon-stem-loop fragments at SSU, CCA-end analogs at PTC) |
+| `<factor name>` (LSU only) | full polymer, no LSU rRNA contact, but a non-ribosomal protein factor at the CCA end (§12.4) |
+
+Concrete real-world state strings the package now produces:
+
+| State | Example deposits |
+|-------|------------------|
+| `A/A`, `P/P`, `E/E` | classical states (5UYM, 7K00) |
+| `A/<factor>` | A-tRNA in EF-Tu / RF complex (5UYM A-tRNA Tu, 5KPX RelA) |
+| `ap/AP` | EF-G-trapped translocation intermediate (5UYN) |
+| `*/AP` | pre-accommodation full A-tRNA at PTC (3JAG, 7O7Z, 7OSM, 7UG7) |
+| `**/A`, `**/P` | CCA-end-only tRNA analog at PTC (7RQA, 8T8C) |
+| `*/E` | mt-rRNA E-site tRNA (no SSU exit-site anchor available in §31.4's filtered set) |
+| `**/**` | (rejected — §31.8) |
+
+### 31.8 No-contact-fragment safeguard
+
+A state of `**/**` would mean a chain shorter than 30 nt that makes
+no anchor contact on either subunit. The §11.2–§11.5 / §11.6
+assignment passes require a ≤cutoff anchor contact for any role, so
+this state shouldn't appear from a normal run. A defensive
+post-processing step in `api._demote_no_contact_fragments` checks
+each assigned tRNA's state after `compute_trna_states` and demotes
+to `other_rna_chains` any chain whose state begins with `**/` and
+ends with `**` (i.e. `**/**`), and any E-tRNA whose state begins
+with `**/`.
+
+The check guards against hand-crafted `ChainAssignments` (used in
+unit tests) and any future code path that bypasses the contact
+requirement.
+
+### 31.9 Open follow-up — BGSU all-chains-per-PDB
+
+The §31.1 chain-substitution path for multi-ribosome bundles is a
+workaround for a BGSU API behaviour: `map_across_chains` currently
+returns **one chain instance per PDB per Rfam equivalence class**
+(the NR representative), even when the deposit contains multiple
+instances of that chain. For bacterial same-organism dimers the
+workaround succeeds because reference and target share residue
+numbering; for cross-organism queries (yeast anchor → human 9B0S)
+the workaround fails because the preserved reference seqid doesn't
+exist in the target chain's numbering. When BGSU is updated to
+return all chain instances per PDB, the chain-substitution shim and
+the per-ribosome correspondence rebuild can both be deleted; the
+existing per-assembly chain filter (§5.2.2) will then pick out the
+correct chain for each ribosome automatically.
+
+Examples of the one-chain-per-PDB pattern (BGSU input → returned mt
+mapping):
+
+| PDB  | Query                  | Returned                  | Missing chain         |
+|------|------------------------|---------------------------|-----------------------|
+| 8R3V | `5J7L\|1\|AA\|A\|1492` | `8R3V\|1\|A1\|A\|1492`    | A2 (second ribosome)  |
+| 8R3V | `5J7L\|1\|DA\|G\|2553` | `8R3V\|1\|72\|G\|2553`    | 71                    |
+| 9O3L | `5J7L\|1\|AA\|A\|1492` | `9O3L\|1\|1a\|A\|1492`    | 2a                    |
+| 9O3L | `5J7L\|1\|DA\|G\|2553` | `9O3L\|1\|1A\|G\|2553`    | 2A                    |
+| 9B0S | `7ZW0\|1\|2\|G\|1150`  | `9B0S\|1\|s2\|G\|1207`    | S2                    |
+| 9B0S | `7ZW0\|1\|LA\|G\|2922` | `9B0S\|1\|l5\|G\|4499`    | L5                    |
+| 7AZO | `5J7L\|1\|AA\|A\|1492` | `7AZO\|1\|16SB\|A\|2115`  | 16SA (assembly 1 has 16SA, BGSU returned a chain from assembly 2) |
