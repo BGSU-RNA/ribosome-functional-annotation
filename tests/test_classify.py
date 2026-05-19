@@ -527,13 +527,27 @@ def test_ambiguous_rrna_core_short_circuits() -> None:
     assert result.skip_reason == C.SKIP_AMBIGUOUS_RRNA_CORE
 
 
-def test_mixed_rrna_core_demoted_to_bacterial_with_warning() -> None:
+def test_mixed_rrna_core_resolved_to_bacterial_when_proteins_bacterial() -> None:
+    """MIXED rrna core resolves to bacterial when the protein vote is Bacteria."""
     ssu = _chain("AA", polymer_type="RNA", rfam=("RF00177", "RF01960"))
     lsu = _chain("DA", polymer_type="RNA", rfam=("RF02541", "RF02543"))
     a = _assembly(rna_chains=[ssu, lsu], protein_chains=_n_proteins(20, "Bacteria"))
     result = classify.classify_assembly(a)
     assert result.classification == "bacterial_ribosome"
     assert classify.WARNING_MIXED_RRNA_CORE in result.warnings
+    assert result.evidence["rrna_core_resolved"] == classify.RRNA_CORE_BACTERIAL
+
+
+def test_mixed_rrna_core_resolved_to_eukaryotic_when_proteins_eukaryotic() -> None:
+    """9B0S-style PDBe over-annotation: MIXED rrna core + Eukaryota proteins
+    should resolve to eukaryotic_ribosome, not eukaryotic_organellar_ribosome."""
+    ssu = _chain("AA", polymer_type="RNA", rfam=("RF00177", "RF01959", "RF01960"))
+    lsu = _chain("DA", polymer_type="RNA", rfam=("RF02540", "RF02541", "RF02543"))
+    a = _assembly(rna_chains=[ssu, lsu], protein_chains=_n_proteins(20, "Eukaryota"))
+    result = classify.classify_assembly(a)
+    assert result.classification == "eukaryotic_ribosome"
+    assert classify.WARNING_MIXED_RRNA_CORE in result.warnings
+    assert result.evidence["rrna_core_resolved"] == classify.RRNA_CORE_EUKARYOTIC
 
 
 def test_archaeal_short_circuits() -> None:
