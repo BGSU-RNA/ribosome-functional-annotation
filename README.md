@@ -299,7 +299,7 @@ ribostate annotate 5UYM --summary
   A-site tRNA: 5UYM|1|Y   state A/Elongation factor Tu 1   codon UUC / anticodon GAA (3 FR3D pair(s))
   P-site tRNA: 5UYM|1|W   state P/P   codon AUG / anticodon CAU (3 FR3D pair(s))
   E-site tRNA: 5UYM|1|X   state E/E   codon AAA / anticodon CAU (0 FR3D pair(s))
-  factors:   Elongation factor Tu 2 [Z]
+  factors:   Elongation factor Tu 1 [Z]
   rotation:  intersubunit 0.9°, SSU head -0.9°
 ```
 

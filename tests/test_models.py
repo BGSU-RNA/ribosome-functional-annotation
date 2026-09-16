@@ -324,7 +324,9 @@ def _full_annotation() -> RibosomeAnnotation:
         peptidyl_trna_chain=chain("W"),
         aminoacyl_trna_state="A/Elongation factor Tu 1",
         peptidyl_trna_state="P/P",
-        non_ribosomal_proteins=[chain("Z", description="Elongation factor Tu 1")],
+        non_ribosomal_proteins=[
+            chain("Z", description="Elongation factor Tu 2", uniprot_name="Elongation factor Tu 1")
+        ],
         assembly_taxonomy=AssemblyTaxonomy(
             lineage=(TaxonNode(tax_id=2, name="Bacteria", depth=1),),
             domain="Bacteria",
@@ -350,7 +352,11 @@ def test_summary_annotated_lists_sites_states_and_evidence() -> None:
     assert "A-site tRNA: 5UYM|1|Y   state A/Elongation factor Tu 1   codon UUC / anticodon GAA (1 FR3D pair(s))" in text
     assert "P-site tRNA: 5UYM|1|W   state P/P" in text
     assert "E-site tRNA: -" in text
+    # UniProt name wins over the depositor description, matching the
+    # state label ("A/Elongation factor Tu 1") so one chain never shows
+    # under two names in the same block.
     assert "factors:   Elongation factor Tu 1 [Z]" in text
+    assert "Tu 2" not in text
     assert "rotation:  intersubunit 0.9°, SSU head 2.5°" in text
     assert "warnings:  1 (see .warnings)" in text
     # No pydantic repr noise (the tester's "TaxonNode" flood).
@@ -385,3 +391,15 @@ def test_summary_annotated_without_optional_blocks() -> None:
     assert "organism" not in text
     assert "rotation" not in text
     assert "warnings" not in text
+
+
+def test_summary_factor_falls_back_to_description_without_uniprot_name() -> None:
+    ann = RibosomeAnnotation(
+        pdb_id="5UYM",
+        assembly_id="1",
+        status="annotated",
+        non_ribosomal_proteins=[
+            ChainRef(pdb_id="5UYM", assembly_id="1", auth_asym_id="Z", description="Some factor")
+        ],
+    )
+    assert "factors:   Some factor [Z]" in ann.summary()

@@ -454,9 +454,12 @@ class RibosomeAnnotation(BaseModel):
             lines.append(f"  {label}: " + "   ".join(parts))
 
         if self.non_ribosomal_proteins:
+            # Same precedence as the tRNA state label (infer.py): the
+            # UniProt name is the stable cross-deposit identifier; the
+            # depositor's pdbx_description is only a fallback.
             shown = self.non_ribosomal_proteins[:6]
             names = ", ".join(
-                f"{c.description or c.uniprot_name or 'unnamed'} [{c.auth_asym_id}]" for c in shown
+                f"{c.uniprot_name or c.description or 'unnamed'} [{c.auth_asym_id}]" for c in shown
             )
             extra = len(self.non_ribosomal_proteins) - len(shown)
             if extra > 0:
