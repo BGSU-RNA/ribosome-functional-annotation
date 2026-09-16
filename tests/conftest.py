@@ -335,3 +335,16 @@ def _isolate_raddb_cache(
 
     isolated = tmp_path_factory.mktemp("isolated-raddb-cache")
     monkeypatch.setattr(raddb_module, "DEFAULT_CACHE_ROOT", isolated)
+
+
+@pytest.fixture(autouse=True)
+def _no_bgsu_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero the BGSU retry delay so error-path tests don't sleep.
+
+    :func:`bgsu_client.fetch_correspondence` retries transient failures
+    with a 5 s * attempt backoff. The retry *logic* is still exercised;
+    only the wall-clock wait is removed.
+    """
+    from ribosome_state_annotator import bgsu_client
+
+    monkeypatch.setattr(bgsu_client, "RETRY_BACKOFF_SECONDS", 0.0)

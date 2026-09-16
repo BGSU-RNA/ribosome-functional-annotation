@@ -311,3 +311,72 @@ def test_cache_clear_prompts_without_yes(tmp_path: Path) -> None:
     assert result.exit_code == 1
     # Cache still there.
     assert cache.root.exists()
+
+
+# ---------------------------------------------------------------------------
+# --summary and --timeout
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_summary_prints_human_readable_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_annotate_pdb(monkeypatch, [_annotated()])
+    result = runner.invoke(cli.app, ["annotate", "5J7L", "-o", str(tmp_path), "--summary"])
+    assert result.exit_code == 0, result.output
+    assert "5J7L assembly 1: annotated — bacterial_ribosome (complete)" in result.stdout
+    assert "SSU rRNA:  5J7L|1|AA" in result.stdout
+    assert "A-site tRNA: -" in result.stdout
+    assert (tmp_path / "5J7L.json").exists()
+
+
+def test_annotate_summary_with_stdout_keeps_json_stream_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_annotate_pdb(monkeypatch, [_annotated()])
+    result = runner.invoke(cli.app, ["annotate", "5J7L", "--stdout", "--summary"])
+    assert result.exit_code == 0, result.output
+    # stdout must still parse as JSON; the summary went to stderr.
+    parsed = json.loads(result.stdout)
+    assert parsed[0]["pdb_id"] == "5J7L"
+
+
+def test_annotate_without_summary_flag_prints_no_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_annotate_pdb(monkeypatch, [_annotated()])
+    result = runner.invoke(cli.app, ["annotate", "5J7L", "-o", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "SSU rRNA:" not in result.stdout
+
+
+def test_annotate_timeout_flag_is_forwarded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def _stub(pdb_id: str, **kwargs: object) -> list[RibosomeAnnotation]:
+        captured.update(kwargs)
+        return [_annotated()]
+
+    monkeypatch.setattr(cli, "annotate_pdb", _stub)
+    result = runner.invoke(cli.app, ["annotate", "5J7L", "-o", str(tmp_path), "--timeout", "300"])
+    assert result.exit_code == 0, result.output
+    assert captured["bgsu_timeout"] == 300.0
+
+
+def test_annotate_batch_summary_and_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def _stub(pdb_ids: Iterable[str], **kwargs: object) -> list[RibosomeAnnotation]:
+        captured.update(kwargs)
+        return [_annotated(), _annotated()]
+
+    monkeypatch.setattr(cli, "annotate_many", _stub)
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("5J7L\n5J7L\n", encoding="utf-8")
+    result = runner.invoke(
+        cli.app,
+        ["annotate-batch", str(ids_file), "-o", str(tmp_path), "--summary", "--timeout", "240"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["bgsu_timeout"] == 240.0
+    assert result.stdout.count("5J7L assembly 1: annotated") == 2

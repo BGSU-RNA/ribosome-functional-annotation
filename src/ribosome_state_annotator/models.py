@@ -220,7 +220,11 @@ class TRNAmRNAInteraction(BaseModel):
     site: Literal["A", "P", "E"]
     mrna_chain_id: str
     trna_chain_id: str
-    anticodon_position_source: Literal["polymer_sequence_index", "auth_seq_id_fallback"]
+    anticodon_position_source: Literal["auth_seq_id"] = "auth_seq_id"
+    """How the anticodon residues were picked: by author sequence IDs
+    34/35/36 anchored on the chain's residue 1 (the only strategy in v1;
+    a 1-based polymer-list index would be off by one for chains that
+    start at residue 0)."""
     codon: Codon
     anticodon: Anticodon
     pairs: list[BasePair] = Field(default_factory=list)
@@ -391,3 +395,84 @@ class RibosomeAnnotation(BaseModel):
     def lsu_chain(self) -> ChainRef | None:
         """The single LSU main rRNA chain if and only if exactly one is present."""
         return self.lsu_main_rrna_chains[0] if len(self.lsu_main_rrna_chains) == 1 else None
+
+    def summary(self) -> str:
+        """Human-readable, multi-line summary of this annotation.
+
+        Intended for interactive use (``print(annotation.summary())``)
+        where the full JSON / ``repr`` is too verbose to read. Shows the
+        status, classification, rRNA chains, mRNA, each occupied tRNA
+        site with its state and codon/anticodon evidence, bound
+        non-ribosomal proteins, large-scale movements, and warning
+        count. Skipped / failed annotations collapse to one or two lines
+        carrying the reason.
+        """
+        head = f"{self.pdb_id} assembly {self.assembly_id or '-'}: {self.status}"
+        if self.status != "annotated":
+            reason = self.skip_reason or "(no reason recorded)"
+            return f"{head} — {reason}"
+
+        lines: list[str] = [
+            f"{head} — {self.ribosome_classification or 'unclassified'} ({self.topology})"
+        ]
+        if self.assembly_taxonomy is not None:
+            organism = self.assembly_taxonomy.species or (
+                self.assembly_taxonomy.lineage[-1].name if self.assembly_taxonomy.lineage else None
+            )
+            if organism:
+                mixed = " (mixed)" if self.assembly_taxonomy.is_mixed else ""
+                lines.append(f"  organism:  {organism}{mixed}")
+
+        def _ifes(chains: list[ChainRef]) -> str:
+            return ", ".join(c.ife for c in chains) if chains else "-"
+
+        lines.append(f"  SSU rRNA:  {_ifes(self.ssu_main_rrna_chains)}")
+        lines.append(f"  LSU rRNA:  {_ifes(self.lsu_main_rrna_chains)}")
+        if self.lsu_associated_rrna_chains:
+            lines.append(f"  5S/5.8S:   {_ifes(self.lsu_associated_rrna_chains)}")
+        lines.append(f"  mRNA:      {self.mrna_chain.ife if self.mrna_chain else '-'}")
+
+        evidence_by_site: dict[str, TRNAmRNAInteraction] = {
+            i.site: i for i in self.trna_mrna_interactions
+        }
+        sites: list[tuple[str, str, ChainRef | None, str | None]] = [
+            ("A", "A-site tRNA", self.aminoacyl_trna_chain, self.aminoacyl_trna_state),
+            ("P", "P-site tRNA", self.peptidyl_trna_chain, self.peptidyl_trna_state),
+            ("E", "E-site tRNA", self.exit_trna_chain, self.exit_trna_state),
+        ]
+        for site, label, chain, state in sites:
+            if chain is None:
+                lines.append(f"  {label}: -")
+                continue
+            parts = [f"{chain.ife}", f"state {state or '?'}"]
+            evidence = evidence_by_site.get(site)
+            if evidence is not None:
+                codon = evidence.codon.sequence or "?"
+                anticodon = evidence.anticodon.sequence_parent or "?"
+                n_pairs = len(evidence.pairs)
+                parts.append(f"codon {codon} / anticodon {anticodon} ({n_pairs} FR3D pair(s))")
+            lines.append(f"  {label}: " + "   ".join(parts))
+
+        if self.non_ribosomal_proteins:
+            shown = self.non_ribosomal_proteins[:6]
+            names = ", ".join(
+                f"{c.description or c.uniprot_name or 'unnamed'} [{c.auth_asym_id}]" for c in shown
+            )
+            extra = len(self.non_ribosomal_proteins) - len(shown)
+            if extra > 0:
+                names += f", +{extra} more"
+            lines.append(f"  factors:   {names}")
+
+        movements = self.large_scale_movements
+        if movements is not None and (
+            movements.intersubunit_rotation is not None or movements.ssu_head_rotation is not None
+        ):
+            rot = movements.intersubunit_rotation
+            head_rot = movements.ssu_head_rotation
+            rot_s = f"{rot:.1f}°" if rot is not None else "n/a"
+            head_s = f"{head_rot:.1f}°" if head_rot is not None else "n/a"
+            lines.append(f"  rotation:  intersubunit {rot_s}, SSU head {head_s}")
+
+        if self.warnings:
+            lines.append(f"  warnings:  {len(self.warnings)} (see .warnings)")
+        return "\n".join(lines)

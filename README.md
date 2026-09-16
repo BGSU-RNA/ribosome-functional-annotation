@@ -241,10 +241,31 @@ Requires Python ≥ 3.10.
 git clone https://github.com/BGSU-RNA/ribosome-functional-annotation.git
 cd ribosome-functional-annotation
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate          # macOS / Linux
+# .venv\Scripts\activate           # Windows (cmd / PowerShell)
 pip install -e .          # runtime dependencies only
 pip install -e ".[dev]"   # additionally install ruff, mypy, pytest
 ```
+
+Notes:
+
+- The build uses a PEP 639 license expression and needs a recent
+  `pip` (≥ 23) — run `python -m pip install --upgrade pip` first if the
+  install fails while reading `pyproject.toml`.
+- On a machine where you cannot create a virtual environment or install
+  system-wide (e.g. a managed university Windows PC), install into your
+  user site instead: `pip install --user -e .`. The `ribostate` command
+  then lives in your user scripts directory
+  (`%APPDATA%\Python\Python3xx\Scripts` on Windows,
+  `~/.local/bin` on Linux), which may need adding to your `PATH`.
+- The **first annotation of a new organism is slow** (one to three
+  minutes). The BGSU correspondence service builds the Rfam alignment on
+  demand for each new set of reference anchors; subsequent queries for
+  the same organism return in seconds and the result is cached locally.
+  If BGSU still times out, raise the limit with `--timeout 300` (CLI)
+  or `bgsu_timeout=300` (Python) and retry. A failed BGSU lookup is
+  reported as `status: "failed"` with a `correspondence_failure` reason
+  — never as a silent, tRNA-less "annotated" record.
 
 ## Usage
 
@@ -260,6 +281,32 @@ directory):**
 ribostate annotate 5UYM
 # writes 5UYM.json, ribosome_chain_annotation.csv, ribosome_assembly_annotation.csv
 ```
+
+**Print a human-readable summary as well** (recommended when exploring;
+the JSON is verbose):
+
+```bash
+ribostate annotate 5UYM --summary
+```
+
+```
+5UYM assembly 1: annotated — bacterial_ribosome (complete)
+  organism:  Escherichia coli K-12
+  SSU rRNA:  5UYM|1|A
+  LSU rRNA:  5UYM|1|01
+  5S/5.8S:   5UYM|1|02
+  mRNA:      5UYM|1|V
+  A-site tRNA: 5UYM|1|Y   state A/Elongation factor Tu 1   codon UUC / anticodon GAA (3 FR3D pair(s))
+  P-site tRNA: 5UYM|1|W   state P/P   codon AUG / anticodon CAU (3 FR3D pair(s))
+  E-site tRNA: 5UYM|1|X   state E/E   codon AAA / anticodon CAU (0 FR3D pair(s))
+  factors:   Elongation factor Tu 2 [Z]
+  rotation:  intersubunit 0.9°, SSU head -0.9°
+```
+
+The E-site codon above is inferred from the mRNA reading frame (no
+direct FR3D pairs, hence the zero count); see the
+[FR3D section](#trna–mrna-codonanticodon-evidence-fr3d) for the
+codon-resolution fallback chain.
 
 **Specify an output destination:**
 
@@ -323,6 +370,8 @@ Additional command-line flags:
 | `--strict` | Skip (rather than warn about) assemblies with low ribosomal-protein counts. |
 | `--input-file PATH` | Parse a local mmCIF instead of downloading from RCSB. |
 | `--refresh-raddb` | Force a check for a newer RADdb release at the start of the run (default: refresh weekly). |
+| `--summary` | After writing the output, print a short human-readable summary per assembly (see above). |
+| `--timeout 180` | BGSU correspondence request timeout in seconds (default 180). Transient failures are retried twice. |
 | `--quiet` | Suppress INFO-level progress messages; emit warnings and errors only. |
 | `--debug` | Enable DEBUG-level logging (includes HTTP traces). |
 
@@ -335,23 +384,49 @@ Comprehensive help is available via `ribostate --help`,
 ```python
 from ribosome_state_annotator import annotate_pdb, annotate_assembly, annotate_many
 
-# Annotate all assemblies in one PDB entry.
-annotations = annotate_pdb("5J7L")
+# Annotate one assembly of an EF-Tu-bound E. coli elongation complex.
+# (5UYM carries A-, P- and E-site tRNAs; the apo reference 5J7L has none.)
+annotation = annotate_assembly("5UYM", "1")
+print(annotation.summary())                      # human-readable overview
 
-# Annotate a specific assembly.
-annotation = annotate_assembly("5J7L", "1")
+print(annotation.status)                         # "annotated"
 print(annotation.ribosome_classification)        # "bacterial_ribosome"
-print(annotation.aminoacyl_trna_chain.ife)       # "5J7L|1|V"
-print(annotation.aminoacyl_trna_state)           # "A/A"
+print(annotation.mrna_chain.ife)                 # "5UYM|1|V"
+print(annotation.aminoacyl_trna_chain.ife)       # "5UYM|1|Y"
+print(annotation.aminoacyl_trna_state)           # "A/Elongation factor Tu 1"
+print(annotation.peptidyl_trna_state)            # "P/P"
+
+# tRNA chain fields are None when that site is empty (or when the entry
+# is an apo ribosome), so guard them before dereferencing:
+for label, chain, state in [
+    ("A", annotation.aminoacyl_trna_chain, annotation.aminoacyl_trna_state),
+    ("P", annotation.peptidyl_trna_chain, annotation.peptidyl_trna_state),
+    ("E", annotation.exit_trna_chain, annotation.exit_trna_state),
+]:
+    print(label, chain.ife if chain else "-", state or "-")
+
+# Codon/anticodon evidence per site, from FR3D base pairs.
+for site in annotation.trna_mrna_interactions:
+    print(site.site, site.codon.sequence, site.anticodon.sequence_parent)
+
+# Annotate every assembly in an entry.
+annotations = annotate_pdb("7ZW0")
 
 # Batch processing of multiple PDB IDs (per-entry errors are caught
 # by default; pass continue_on_error=False to abort on first failure).
-results = annotate_many(["5J7L", "7ZW0", "6ZMI"])
+results = annotate_many(["5UYM", "7ZW0", "6ZMI"])
+for a in results:
+    print(a.summary())
+
+# Always check status: a BGSU or RCSB outage yields status="failed"
+# with the reason in skip_reason rather than an exception.
+failed = [a for a in results if a.status == "failed"]
 ```
 
 Each result is returned as a `RibosomeAnnotation` Pydantic model; see
 `src/ribosome_state_annotator/models.py` for the complete field
-inventory. The role-based rRNA outputs (`ssu_main_rrna_chains`,
+inventory. `annotate_pdb` and friends accept `bgsu_timeout=<seconds>`
+(default 180) for slow networks. The role-based rRNA outputs (`ssu_main_rrna_chains`,
 `lsu_main_rrna_chains`, `lsu_associated_rrna_chains`) are canonical;
 the `ssu_chain` and `lsu_chain` attributes are convenience aliases
 that resolve to `None` when the underlying list contains anything
@@ -541,7 +616,7 @@ Example A-site entry from 5UYM:
   "site": "A",
   "mrna_chain_id": "V",
   "trna_chain_id": "Y",
-  "anticodon_position_source": "polymer_sequence_index",
+  "anticodon_position_source": "auth_seq_id",
   "codon": { "sequence": "UUC", "assignment_status": "complete", "residues": [...] },
   "anticodon": { "sequence_parent": "GAA", "residues": [...] },
   "pairs": [

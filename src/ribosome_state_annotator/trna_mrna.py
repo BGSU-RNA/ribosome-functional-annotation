@@ -1034,7 +1034,7 @@ def _extract_one_site(
         site=site,
         mrna_chain_id=mrna_chain_id,
         trna_chain_id=trna_chain_id,
-        anticodon_position_source="polymer_sequence_index",
+        anticodon_position_source="auth_seq_id",
         codon=codon,
         anticodon=anticodon,
         pairs=pairs,

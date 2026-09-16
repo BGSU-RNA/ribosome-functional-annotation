@@ -583,7 +583,7 @@ def test_extract_end_to_end_single_site() -> None:
     assert a.site == "A"
     assert a.mrna_chain_id == "V"
     assert a.trna_chain_id == "Y"
-    assert a.anticodon_position_source == "polymer_sequence_index"
+    assert a.anticodon_position_source == "auth_seq_id"
     assert a.codon.assignment_status == "complete"
     # mRNA 19 (residue C at polymer index 18 of pattern A,C,G,U) is base 'C',
     # mRNA 20 is base 'U', mRNA 21 is base 'A' → sequence = 'CUA'.

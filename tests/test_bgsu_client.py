@@ -248,3 +248,88 @@ def test_parse_filters_non_string_mapped_units() -> None:
         ]
     }
     assert bgsu_client.parse_alignment_response(payload) == {"5J7L|1|AA|G|926": ["7K00|1|a|G|926"]}
+
+
+# ---------------------------------------------------------------------------
+# fetch_correspondence — timeout + retry policy
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_fetch_correspondence_retries_after_timeout_then_succeeds() -> None:
+    """A cold BGSU query can exceed the timeout; the second attempt wins."""
+    route = respx.get(bgsu_client.BGSU_CORRESPONDENCE_URL).mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(200, json=SPEC_5_2_1_RESPONSE),
+        ]
+    )
+    result = bgsu_client.fetch_correspondence(["5J7L|1|AA|G|926"], retries=2)
+    assert route.call_count == 2
+    assert "5J7L|1|AA|G|926" in result
+
+
+@respx.mock
+def test_fetch_correspondence_retries_on_http_5xx() -> None:
+    route = respx.get(bgsu_client.BGSU_CORRESPONDENCE_URL).mock(
+        side_effect=[
+            httpx.Response(503),
+            httpx.Response(200, json={"alignment": []}),
+        ]
+    )
+    bgsu_client.fetch_correspondence(["5J7L|1|AA|G|926"], retries=1)
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_fetch_correspondence_exhausted_retries_raises_transient_error() -> None:
+    route = respx.get(bgsu_client.BGSU_CORRESPONDENCE_URL).mock(
+        side_effect=httpx.ReadTimeout("slow")
+    )
+    with pytest.raises(bgsu_client.BgsuTransientError, match="timed out after 7 s"):
+        bgsu_client.fetch_correspondence(["5J7L|1|AA|G|926"], retries=2, timeout=7.0)
+    # first attempt + 2 retries
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_fetch_correspondence_does_not_retry_non_transient_errors() -> None:
+    route = respx.get(bgsu_client.BGSU_CORRESPONDENCE_URL).mock(return_value=httpx.Response(404))
+    with pytest.raises(ApiRequestError, match="HTTP 404"):
+        bgsu_client.fetch_correspondence(["5J7L|1|AA|G|926"], retries=3)
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_fetch_correspondence_retries_zero_means_single_attempt() -> None:
+    route = respx.get(bgsu_client.BGSU_CORRESPONDENCE_URL).mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+    with pytest.raises(ApiRequestError, match="request failed"):
+        bgsu_client.fetch_correspondence(["5J7L|1|AA|G|926"], retries=0)
+    assert route.call_count == 1
+
+
+def test_transient_error_is_an_api_request_error() -> None:
+    """Existing ``except ApiRequestError`` handlers must keep catching it."""
+    assert issubclass(bgsu_client.BgsuTransientError, ApiRequestError)
+
+
+@respx.mock
+def test_fetch_correspondence_applies_timeout_per_request_even_with_caller_client() -> None:
+    """The timeout is applied on the request itself, so a caller-supplied
+    client with a short default doesn't silently override it."""
+    route = respx.get(bgsu_client.BGSU_CORRESPONDENCE_URL).mock(
+        return_value=httpx.Response(200, json={"alignment": []})
+    )
+    with httpx.Client(timeout=1.0) as client:
+        bgsu_client.fetch_correspondence(["5J7L|1|AA|G|926"], client=client, timeout=123.0)
+    request_timeout = route.calls.last.request.extensions["timeout"]
+    assert request_timeout["read"] == 123.0
+
+
+def test_default_timeout_exceeds_measured_cold_query_latency() -> None:
+    """Guard against regressing the default below the ~90 s cold-query
+    latency measured against live BGSU (September 2026)."""
+    assert bgsu_client.DEFAULT_BGSU_TIMEOUT >= 120.0
+    assert bgsu_client.DEFAULT_BGSU_RETRIES >= 1

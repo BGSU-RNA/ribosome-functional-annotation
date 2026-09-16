@@ -42,6 +42,7 @@ from ribosome_state_annotator.bgsu_client import (
     DEFAULT_BGSU_DEPTH,
     DEFAULT_BGSU_RESOLUTION,
     DEFAULT_BGSU_SCOPE,
+    DEFAULT_BGSU_TIMEOUT,
     fetch_correspondence,
     parse_alignment_response,
 )
@@ -93,13 +94,13 @@ from ribosome_state_annotator.rcsb_client import (
     fetch_entry_payload,
     parse_assemblies,
 )
-from ribosome_state_annotator.taxonomy import aggregate_assembly_lineage
 from ribosome_state_annotator.rfam_pdb_region import (
     RfamPdbRegionDataset,
     ensure_rfam_pdb_region_available,
     get_rfam_mapping_for_pdb,
     load_rfam_pdb_region_dataset,
 )
+from ribosome_state_annotator.taxonomy import aggregate_assembly_lineage
 from ribosome_state_annotator.trna_mrna import extract_trna_mrna_interactions
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,7 @@ def annotate_pdb(
     refresh_rfam: bool = False,
     no_rfam: bool = False,
     no_fr3d: bool = False,
+    bgsu_timeout: float = DEFAULT_BGSU_TIMEOUT,
 ) -> list[RibosomeAnnotation]:
     """Annotate every biological assembly in one PDB entry.
 
@@ -173,6 +175,13 @@ def annotate_pdb(
         no_fr3d: Skip the tRNA-mRNA codon/anticodon extraction (no FR3D
             call). The output JSON still contains
             ``trna_mrna_interactions`` as an empty list.
+        bgsu_timeout: Per-request timeout in seconds for the BGSU
+            correspondence call. BGSU builds alignments on demand and a
+            cold query can take well over a minute; transient failures
+            are retried automatically. When the fetch still fails the
+            assembly is reported with ``status="failed"`` and a
+            ``correspondence_failure`` skip reason — never as a
+            silently tRNA-less "annotated" record.
 
     Returns:
         A list of :class:`RibosomeAnnotation` — one per processed assembly
@@ -267,6 +276,7 @@ def annotate_pdb(
                 client=client,
                 raddb_dataset=resolved_raddb,
                 no_fr3d=no_fr3d,
+                bgsu_timeout=bgsu_timeout,
             )
         )
     return results
@@ -400,6 +410,7 @@ def _annotate_one_assembly(
     client: httpx.Client | None,
     raddb_dataset: RADdbDataset | None = None,
     no_fr3d: bool = False,
+    bgsu_timeout: float = DEFAULT_BGSU_TIMEOUT,
 ) -> list[RibosomeAnnotation]:
     """Annotate one biological assembly, returning one or more annotations.
 
@@ -495,17 +506,37 @@ def _annotate_one_assembly(
                 chain_substitution=chain_substitution,
                 cache=cache,
                 client=client,
+                timeout=bgsu_timeout,
             )
         except (ApiRequestError, CorrespondenceMappingError) as exc:
-            logger.warning(
-                "correspondence fetch failed for %s subunit %s: %s",
+            # Without the projected anchors every downstream assignment
+            # (mRNA, A/P/E tRNA, states) would be empty. Surface that as
+            # a hard failure rather than an "annotated" record that is
+            # indistinguishable from a genuine apo ribosome.
+            logger.error(
+                "correspondence fetch failed for %s assembly %s subunit %s: %s",
                 pdb_id,
+                aid,
                 subunit,
                 exc,
             )
             for site_key in subunit_groups:
                 warnings.append(f"correspondence_fetch_failed_for_{site_key}")
-            continue
+            return [
+                RibosomeAnnotation(
+                    pdb_id=pdb_id,
+                    assembly_id=aid,
+                    status="failed",
+                    skip_reason=f"correspondence_failure ({subunit}): {exc}",
+                    ribosome_classification=classification_result.classification,
+                    topology=classification_result.topology,
+                    ssu_main_rrna_chains=by_role.get("ssu_main_rrna", []),
+                    lsu_main_rrna_chains=by_role.get("lsu_main_rrna", []),
+                    lsu_associated_rrna_chains=by_role.get("lsu_associated_rrna", []),
+                    classification_evidence=classification_result.evidence,
+                    warnings=warnings,
+                )
+            ]
         for site_key, result in subunit_results.items():
             correspondence_by_site[site_key] = result
             warnings.extend(result.warnings)
@@ -554,6 +585,7 @@ def _annotate_one_assembly(
             cutoff=cutoff,
             raddb_dataset=raddb_dataset,
             no_fr3d=no_fr3d,
+            bgsu_timeout=bgsu_timeout,
         )
 
     annotation = _run_assignment_for_assembly(
@@ -664,6 +696,7 @@ def _annotate_multi_ribosome_bundle(
     cutoff: float,
     raddb_dataset: RADdbDataset | None,
     no_fr3d: bool,
+    bgsu_timeout: float = DEFAULT_BGSU_TIMEOUT,
 ) -> list[RibosomeAnnotation]:
     """Split a multi-ribosome assembly and emit one annotation per ribosome.
 
@@ -761,6 +794,7 @@ def _annotate_multi_ribosome_bundle(
             lsu_target_chain=lsu.auth_asym_id,
             cache=cache,
             client=client,
+            bgsu_timeout=bgsu_timeout,
         )
 
         annotation = _run_assignment_for_assembly(
@@ -849,6 +883,7 @@ def _rebuild_correspondence_for_ribosome(
     lsu_target_chain: str,
     cache: Cache | None,
     client: httpx.Client | None,
+    bgsu_timeout: float = DEFAULT_BGSU_TIMEOUT,
 ) -> dict[str, CorrespondenceResult]:
     """Rebuild per-site :class:`CorrespondenceResult` for one ribosome.
 
@@ -883,6 +918,7 @@ def _rebuild_correspondence_for_ribosome(
                 chain_substitution=chain_substitution,
                 cache=cache,
                 client=client,
+                timeout=bgsu_timeout,
             )
         except (ApiRequestError, CorrespondenceMappingError) as exc:
             # Shouldn't happen on the warm cache path that fed the
@@ -1222,6 +1258,7 @@ def _get_or_fetch_subunit_correspondence(
     scope: str = DEFAULT_BGSU_SCOPE,
     resolution: str = DEFAULT_BGSU_RESOLUTION,
     depth: int = DEFAULT_BGSU_DEPTH,
+    timeout: float = DEFAULT_BGSU_TIMEOUT,
 ) -> dict[str, CorrespondenceResult]:
     """Batched BGSU fetch for all sites in one subunit.
 
@@ -1274,7 +1311,12 @@ def _get_or_fetch_subunit_correspondence(
             len(site_unit_ranges),
         )
         raw = fetch_correspondence(
-            all_units, scope=scope, resolution=resolution, depth=depth, client=client
+            all_units,
+            scope=scope,
+            resolution=resolution,
+            depth=depth,
+            client=client,
+            timeout=timeout,
         )
         if cache is not None:
             alignment_payload = {

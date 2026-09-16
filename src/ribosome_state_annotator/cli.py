@@ -17,6 +17,7 @@ from rich.table import Table
 
 from ribosome_state_annotator import __version__
 from ribosome_state_annotator.api import annotate_many, annotate_pdb
+from ribosome_state_annotator.bgsu_client import DEFAULT_BGSU_TIMEOUT
 from ribosome_state_annotator.cache import Cache
 from ribosome_state_annotator.coordinates import CoordinateSource
 from ribosome_state_annotator.models import RibosomeAnnotation
@@ -202,6 +203,7 @@ def _emit_annotations(
     no_create_dirs: bool,
     no_csv: bool,
     default_basename: str,
+    summary: bool = False,
 ) -> None:
     """Route annotations to stdout or to ``output`` per CLI flags.
 
@@ -221,6 +223,11 @@ def _emit_annotations(
     When writing JSON to a file and ``--no-csv`` is *not* set, two
     companion CSVs are written alongside (``ribosome_chain_annotation.csv``
     and ``ribosome_assembly_annotation.csv``).
+
+    With ``summary=True`` a human-readable per-assembly summary
+    (:meth:`RibosomeAnnotation.summary`) is printed after the output is
+    written — to stdout normally, or to stderr when ``--stdout`` is in
+    use so the JSON stream stays clean.
     """
     _validate_output_flags(output, stdout)
 
@@ -228,6 +235,8 @@ def _emit_annotations(
         # Stream JSON to stdout. JSONL alternative is available via
         # explicit shell-side redirection of a .jsonl --output instead.
         stdout_console.print(render_json(annotations), highlight=False)
+        if summary:
+            _print_summaries(annotations, to_stderr=True)
         return
 
     resolved = _resolve_output_path(output, default_basename)
@@ -256,6 +265,15 @@ def _emit_annotations(
         f"[green]wrote {len(annotations)} annotation(s) to {resolved} "
         f"(annotated={n_annotated}, skipped={n_skipped}, failed={n_failed})[/green]"
     )
+    if summary:
+        _print_summaries(annotations, to_stderr=False)
+
+
+def _print_summaries(annotations: list[RibosomeAnnotation], *, to_stderr: bool) -> None:
+    """Print :meth:`RibosomeAnnotation.summary` for each annotation."""
+    console = Console(stderr=True) if to_stderr else stdout_console
+    for annotation in annotations:
+        console.print(annotation.summary(), highlight=False, markup=False, soft_wrap=True)
 
 
 def _read_pdb_ids(pdb_ids_file: Path) -> list[str]:
@@ -385,6 +403,23 @@ def annotate(
             help="Force an online check for a newer Rfam pdb_full_region file (default: refresh weekly).",
         ),
     ] = False,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary",
+            help="After writing the output, print a short human-readable summary per assembly.",
+        ),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            help=(
+                "BGSU correspondence request timeout in seconds. BGSU builds alignments "
+                "on demand; the first query for a new organism can take over 90 s."
+            ),
+        ),
+    ] = DEFAULT_BGSU_TIMEOUT,
     quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
@@ -403,6 +438,7 @@ def annotate(
         local_coordinate_path=local_path,
         refresh_raddb=refresh_raddb,
         refresh_rfam=refresh_rfam,
+        bgsu_timeout=timeout,
     )
     _emit_annotations(
         annotations,
@@ -411,6 +447,7 @@ def annotate(
         no_create_dirs=no_create_dirs,
         no_csv=no_csv,
         default_basename=pdb_id.upper(),
+        summary=summary,
     )
 
 
@@ -489,6 +526,23 @@ def annotate_batch(
             help="Force an online check for a newer Rfam pdb_full_region file (default: refresh weekly).",
         ),
     ] = False,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary",
+            help="After writing the output, print a short human-readable summary per assembly.",
+        ),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            help=(
+                "BGSU correspondence request timeout in seconds. BGSU builds alignments "
+                "on demand; the first query for a new organism can take over 90 s."
+            ),
+        ),
+    ] = DEFAULT_BGSU_TIMEOUT,
     quiet: Annotated[bool, typer.Option("--quiet", help="Suppress INFO progress; warnings/errors only.")] = False,
     debug: Annotated[bool, typer.Option("--debug", help="DEBUG-level logging (includes HTTP traces).")] = False,
 ) -> None:
@@ -508,6 +562,7 @@ def annotate_batch(
         strict_complete_check=strict,
         refresh_raddb=refresh_raddb,
         refresh_rfam=refresh_rfam,
+        bgsu_timeout=timeout,
     )
     _emit_annotations(
         annotations,
@@ -516,6 +571,7 @@ def annotate_batch(
         no_create_dirs=no_create_dirs,
         no_csv=no_csv,
         default_basename="batch",
+        summary=summary,
     )
 
 

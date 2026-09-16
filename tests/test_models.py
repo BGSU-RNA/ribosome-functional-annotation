@@ -256,3 +256,132 @@ def test_annotation_dump_includes_aliases() -> None:
     assert "lsu_chain" in dump
     assert dump["ssu_chain"]["ife"] == "5J7L|1|AA"
     assert dump["lsu_chain"]["ife"] == "5J7L|1|DA"
+
+
+# ---------------------------------------------------------------------------
+# RibosomeAnnotation.summary()
+# ---------------------------------------------------------------------------
+
+
+def _full_annotation() -> RibosomeAnnotation:
+    from ribosome_state_annotator.models import (
+        Anticodon,
+        AnticodonResidue,
+        AssemblyTaxonomy,
+        BasePair,
+        Codon,
+        LargeScaleMovements,
+        TaxonNode,
+        TRNAmRNAInteraction,
+    )
+
+    def chain(asym: str, **kw: object) -> ChainRef:
+        return ChainRef(pdb_id="5UYM", assembly_id="1", auth_asym_id=asym, **kw)  # type: ignore[arg-type]
+
+    pair = BasePair(
+        codon_position=3,
+        trna_position=34,
+        codon_unit_id="5UYM|1|V|C|21",
+        trna_unit_id="5UYM|1|Y|G|34",
+        codon_base="C",
+        trna_parent_base="G",
+        trna_chem_comp_id="G",
+        trna_is_modified=False,
+        fr3d_interaction="cWW",
+        basepair="C-G",
+        is_wobble_position=True,
+        assignment_status="assigned",
+    )
+    interaction = TRNAmRNAInteraction(
+        site="A",
+        mrna_chain_id="V",
+        trna_chain_id="Y",
+        codon=Codon(sequence="UUC", assignment_status="complete"),
+        anticodon=Anticodon(
+            sequence_parent="GAA",
+            residues=[
+                AnticodonResidue(
+                    trna_position=34,
+                    unit_id="5UYM|1|Y|G|34",
+                    parent_base="G",
+                    trna_chem_comp_id="G",
+                    is_modified=False,
+                )
+            ],
+        ),
+        pairs=[pair],
+    )
+    return RibosomeAnnotation(
+        pdb_id="5UYM",
+        assembly_id="1",
+        status="annotated",
+        ribosome_classification="bacterial_ribosome",
+        ssu_main_rrna_chains=[chain("A")],
+        lsu_main_rrna_chains=[chain("01")],
+        lsu_associated_rrna_chains=[chain("02")],
+        mrna_chain=chain("V"),
+        aminoacyl_trna_chain=chain("Y"),
+        peptidyl_trna_chain=chain("W"),
+        aminoacyl_trna_state="A/Elongation factor Tu 1",
+        peptidyl_trna_state="P/P",
+        non_ribosomal_proteins=[chain("Z", description="Elongation factor Tu 1")],
+        assembly_taxonomy=AssemblyTaxonomy(
+            lineage=(TaxonNode(tax_id=2, name="Bacteria", depth=1),),
+            domain="Bacteria",
+            species="Escherichia coli",
+        ),
+        large_scale_movements=LargeScaleMovements(
+            rad_date="20260508", intersubunit_rotation=0.9, ssu_head_rotation=2.5
+        ),
+        trna_mrna_interactions=[interaction],
+        warnings=["something"],
+    )
+
+
+def test_summary_annotated_lists_sites_states_and_evidence() -> None:
+    text = _full_annotation().summary()
+    lines = text.splitlines()
+    assert lines[0] == "5UYM assembly 1: annotated — bacterial_ribosome (complete)"
+    assert "organism:  Escherichia coli" in text
+    assert "SSU rRNA:  5UYM|1|A" in text
+    assert "LSU rRNA:  5UYM|1|01" in text
+    assert "5S/5.8S:   5UYM|1|02" in text
+    assert "mRNA:      5UYM|1|V" in text
+    assert "A-site tRNA: 5UYM|1|Y   state A/Elongation factor Tu 1   codon UUC / anticodon GAA (1 FR3D pair(s))" in text
+    assert "P-site tRNA: 5UYM|1|W   state P/P" in text
+    assert "E-site tRNA: -" in text
+    assert "factors:   Elongation factor Tu 1 [Z]" in text
+    assert "rotation:  intersubunit 0.9°, SSU head 2.5°" in text
+    assert "warnings:  1 (see .warnings)" in text
+    # No pydantic repr noise (the tester's "TaxonNode" flood).
+    assert "TaxonNode" not in text
+    assert "ChainRef" not in text
+
+
+def test_summary_failed_is_one_line_with_reason() -> None:
+    ann = RibosomeAnnotation(
+        pdb_id="5J7L",
+        assembly_id="1",
+        status="failed",
+        skip_reason="correspondence_failure (lsu): BGSU correspondence request timed out",
+    )
+    assert ann.summary() == (
+        "5J7L assembly 1: failed — correspondence_failure (lsu): "
+        "BGSU correspondence request timed out"
+    )
+
+
+def test_summary_skipped_entry_level_uses_dash_for_missing_assembly() -> None:
+    ann = RibosomeAnnotation(pdb_id="2N0L", assembly_id=None, status="skipped", skip_reason="nmr")
+    assert ann.summary() == "2N0L assembly -: skipped — nmr"
+
+
+def test_summary_annotated_without_optional_blocks() -> None:
+    ann = RibosomeAnnotation(pdb_id="5J7L", assembly_id="1", status="annotated")
+    text = ann.summary()
+    assert "unclassified" in text
+    assert "SSU rRNA:  -" in text
+    assert "mRNA:      -" in text
+    assert "organism" not in text
+    assert "rotation" not in text
+    assert "warnings" not in text

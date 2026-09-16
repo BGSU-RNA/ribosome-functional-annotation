@@ -20,7 +20,7 @@ import respx
 
 from ribosome_state_annotator import api
 from ribosome_state_annotator import constants as C
-from ribosome_state_annotator.bgsu_client import BGSU_CORRESPONDENCE_URL
+from ribosome_state_annotator.bgsu_client import BGSU_CORRESPONDENCE_URL, DEFAULT_BGSU_RETRIES
 from ribosome_state_annotator.cache import Cache
 from ribosome_state_annotator.coordinates import RCSB_ASSEMBLY_DOWNLOAD_TEMPLATE
 from ribosome_state_annotator.rcsb_client import RCSB_GRAPHQL_URL
@@ -623,3 +623,51 @@ def test_reference_selection(classification: str, expected_pdb: str) -> None:
 
 def test_reference_selection_unknown_classification_returns_empty() -> None:
     assert api._select_reference_units("archaeal_ribosome") == {}
+
+
+# ---------------------------------------------------------------------------
+# BGSU correspondence failure → status="failed" (not a hollow "annotated")
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_bgsu_failure_yields_failed_status_not_hollow_annotation(
+    ribosome_fixture: gemmi.Structure, tmp_path: Path
+) -> None:
+    """A BGSU outage/timeout must surface as ``status="failed"``.
+
+    Regression for the external-tester report where a BGSU timeout
+    produced a CSV row with rRNA chains but no mRNA/tRNA fields and
+    ``status="annotated"`` — indistinguishable from an apo ribosome.
+    """
+    cif_bytes = _ribosome_cif_bytes(ribosome_fixture, tmp_path)
+    routes = _install_mocks(cif_bytes=cif_bytes)
+    routes["bgsu"].side_effect = httpx.ReadTimeout("The read operation timed out")
+
+    results = api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True, no_raddb=True)
+    assert len(results) == 1
+    ann = results[0]
+    assert ann.status == "failed"
+    assert ann.skip_reason is not None
+    assert ann.skip_reason.startswith("correspondence_failure (ssu)")
+    assert "timed out" in ann.skip_reason
+    # Classification and rRNA chains are still reported so the failure
+    # row is informative; functional chains are absent by construction.
+    assert ann.ribosome_classification == "bacterial_ribosome"
+    assert ann.ssu_main_rrna_chains
+    assert ann.mrna_chain is None
+    assert ann.aminoacyl_trna_chain is None
+    assert any(w.startswith("correspondence_fetch_failed_for_ssu_") for w in ann.warnings)
+    # Retries were attempted before giving up (1 + DEFAULT_BGSU_RETRIES).
+    assert routes["bgsu"].call_count == 1 + DEFAULT_BGSU_RETRIES
+
+
+@respx.mock
+def test_bgsu_timeout_kwarg_is_threaded_to_request(
+    ribosome_fixture: gemmi.Structure, tmp_path: Path
+) -> None:
+    cif_bytes = _ribosome_cif_bytes(ribosome_fixture, tmp_path)
+    routes = _install_mocks(cif_bytes=cif_bytes)
+    api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True, no_raddb=True, bgsu_timeout=77.0)
+    assert routes["bgsu"].called
+    assert routes["bgsu"].calls.last.request.extensions["timeout"]["read"] == 77.0

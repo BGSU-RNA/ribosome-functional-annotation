@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -67,6 +68,32 @@ PDBs (e.g. 5FDV's ``1a`` vs ``2a``, or 5J7L's ``AA`` vs ``BA``) are
 handled by the chain-substitution fallback in
 :func:`correspondence.build_correspondence_result`."""
 
+DEFAULT_BGSU_TIMEOUT = 180.0
+"""Per-request read timeout in seconds for the BGSU correspondence call.
+
+BGSU builds the Rfam alignment on demand. A *cold* query for a fresh
+anchor set was measured at ~90 s (September 2026); the warm repeat took
+~8 s. The previous 60 s default therefore failed on every first query
+for a new organism and silently produced annotations with no tRNA
+assignments. Keep this comfortably above the cold-query latency."""
+
+DEFAULT_BGSU_RETRIES = 2
+"""Number of *additional* attempts after the first failed BGSU call.
+Only transient failures are retried (timeouts, connection errors,
+HTTP 5xx) — see :class:`BgsuTransientError`."""
+
+RETRY_BACKOFF_SECONDS = 5.0
+"""Base delay between BGSU retries; attempt ``n`` waits ``n * base``.
+Module-level so tests can zero it."""
+
+
+class BgsuTransientError(ApiRequestError):
+    """A BGSU failure that is worth retrying (timeout, connection error, 5xx).
+
+    Subclass of :class:`~.exceptions.ApiRequestError` so existing
+    ``except ApiRequestError`` handlers keep working unchanged.
+    """
+
 
 # ---------------------------------------------------------------------------
 # HTTP
@@ -80,7 +107,8 @@ def fetch_correspondence(
     resolution: str = DEFAULT_BGSU_RESOLUTION,
     depth: int = DEFAULT_BGSU_DEPTH,
     client: httpx.Client | None = None,
-    timeout: float = 60.0,
+    timeout: float = DEFAULT_BGSU_TIMEOUT,
+    retries: int = DEFAULT_BGSU_RETRIES,
 ) -> dict[str, list[str]]:
     """GET BGSU correspondence mappings for a batch of reference units.
 
@@ -100,12 +128,17 @@ def fetch_correspondence(
         client: Optional pre-built :class:`httpx.Client`. Used by tests and
             by the cache layer (step 6). When omitted, an ephemeral client
             is created and closed inside this function.
-        timeout: Request timeout in seconds. Ignored when ``client`` is supplied.
+        timeout: Per-request timeout in seconds. Applied to every attempt,
+            whether or not ``client`` is supplied.
+        retries: Additional attempts after a transient failure (timeout,
+            connection error, HTTP 5xx). Non-transient failures (4xx,
+            malformed body) raise immediately.
 
     Raises:
         ValueError: if ``reference_units`` is empty.
         ApiRequestError: HTTP failure, non-200 status, non-JSON body, or
-            non-object JSON.
+            non-object JSON. Transient failures that exhausted every retry
+            surface as :class:`BgsuTransientError` (a subclass).
         CorrespondenceMappingError: if the parsed JSON does not contain a
             top-level ``alignment`` or ``mappings`` list (see
             :func:`parse_alignment_response`).
@@ -116,13 +149,35 @@ def fetch_correspondence(
 
     own_client = client is None
     http: httpx.Client = client if client is not None else httpx.Client(timeout=timeout)
+    attempts = max(1, retries + 1)
     try:
-        return _query_bgsu(
-            http, units_list, scope=scope, resolution=resolution, depth=depth
-        )
+        for attempt in range(1, attempts + 1):
+            try:
+                return _query_bgsu(
+                    http,
+                    units_list,
+                    scope=scope,
+                    resolution=resolution,
+                    depth=depth,
+                    timeout=timeout,
+                )
+            except BgsuTransientError as exc:
+                if attempt >= attempts:
+                    raise
+                delay = RETRY_BACKOFF_SECONDS * attempt
+                logger.warning(
+                    "BGSU correspondence attempt %d/%d failed (%s); retrying in %.0f s",
+                    attempt,
+                    attempts,
+                    exc,
+                    delay,
+                )
+                if delay > 0:
+                    time.sleep(delay)
     finally:
         if own_client:
             http.close()
+    raise AssertionError("unreachable: retry loop always returns or raises")
 
 
 def _query_bgsu(
@@ -132,8 +187,14 @@ def _query_bgsu(
     scope: str,
     resolution: str,
     depth: int,
+    timeout: float = DEFAULT_BGSU_TIMEOUT,
 ) -> dict[str, list[str]]:
-    """Single HTTP call to BGSU; raises the typed exceptions on failure."""
+    """Single HTTP call to BGSU; raises the typed exceptions on failure.
+
+    Timeouts, connection errors and HTTP 5xx raise
+    :class:`BgsuTransientError` so the caller can retry; everything else
+    raises plain :class:`ApiRequestError`.
+    """
     params = {
         "id": ",".join(units),
         "scope": scope,
@@ -149,9 +210,20 @@ def _query_bgsu(
     }
     headers = {"Accept": "application/json"}
     try:
-        response = http.get(BGSU_CORRESPONDENCE_URL, params=params, headers=headers)
+        response = http.get(
+            BGSU_CORRESPONDENCE_URL, params=params, headers=headers, timeout=timeout
+        )
+    except httpx.TimeoutException as exc:
+        raise BgsuTransientError(
+            f"BGSU correspondence request timed out after {timeout:.0f} s "
+            f"(BGSU builds alignments on demand; a cold query can take >90 s): {exc}"
+        ) from exc
+    except httpx.TransportError as exc:
+        raise BgsuTransientError(f"BGSU correspondence request failed: {exc}") from exc
     except httpx.HTTPError as exc:
         raise ApiRequestError(f"BGSU correspondence request failed: {exc}") from exc
+    if response.status_code >= 500:
+        raise BgsuTransientError(f"BGSU correspondence returned HTTP {response.status_code}")
     if response.status_code != 200:
         raise ApiRequestError(f"BGSU correspondence returned HTTP {response.status_code}")
     try:
