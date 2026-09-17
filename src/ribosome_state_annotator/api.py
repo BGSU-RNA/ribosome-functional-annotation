@@ -46,6 +46,12 @@ from ribosome_state_annotator.bgsu_client import (
     fetch_correspondence,
     parse_alignment_response,
 )
+from ribosome_state_annotator.bgsu_nr_list import (
+    BgsuNrListDataset,
+    ensure_bgsu_nr_list_available,
+    get_bgsu_rfam_mapping_for_pdb,
+    load_bgsu_nr_list_dataset,
+)
 from ribosome_state_annotator.cache import Cache
 from ribosome_state_annotator.classify import (
     ClassificationResult,
@@ -134,6 +140,9 @@ def annotate_pdb(
     rfam_dataset: RfamPdbRegionDataset | None = None,
     refresh_rfam: bool = False,
     no_rfam: bool = False,
+    bgsu_nr_dataset: BgsuNrListDataset | None = None,
+    refresh_bgsu_nr: bool = False,
+    no_bgsu_nr: bool = False,
     no_fr3d: bool = False,
     bgsu_timeout: float = DEFAULT_BGSU_TIMEOUT,
 ) -> list[RibosomeAnnotation]:
@@ -172,6 +181,13 @@ def annotate_pdb(
             pdb_full_region file even if the local copy is fresh.
         no_rfam: Skip the Rfam file augmentation entirely. RCSB-supplied
             Rfam tags (when present) are still used.
+        bgsu_nr_dataset: Pre-loaded BGSU representative-set dataset
+            (weekly per-chain Rfam families). When omitted, loaded
+            lazily on first use and reused across assemblies.
+        refresh_bgsu_nr: Force an online check for a newer BGSU
+            representative-set release even if the local copy is fresh.
+        no_bgsu_nr: Skip the BGSU representative-set augmentation. The
+            EBI Rfam file (if enabled) is then the only rRNA Rfam source.
         no_fr3d: Skip the tRNA-mRNA codon/anticodon extraction (no FR3D
             call). The output JSON still contains
             ``trna_mrna_interactions`` as an empty list.
@@ -237,12 +253,20 @@ def annotate_pdb(
             return []
 
     # Rfam augmentation: RCSB no longer supplies Rfam annotations for
-    # rRNA chains. We pull single-best-score Rfam tags from the EBI
-    # ``pdb_full_region.txt.gz`` flat file (locally cached, weekly
-    # refresh), which selects one Rfam per chain by highest bit-score
-    # and eliminates the multi-family over-annotation noise PDBe's REST
-    # endpoint surfaces (the source of the historical MIXED rrna_core
-    # edge case on entries like 9B0S).
+    # rRNA chains. Two locally cached, weekly-refreshed flat files supply
+    # them instead:
+    #
+    # - EBI ``pdb_full_region.txt.gz`` — single best-score Rfam per
+    #   chain, which eliminates the multi-family over-annotation noise
+    #   PDBe's REST endpoint surfaces (the historical MIXED rrna_core
+    #   edge case on entries like 9B0S). EBI regenerates it irregularly
+    #   and it can lag PDB releases by months.
+    # - BGSU representative-set "full" CSV — one Rfam per chain, shipped
+    #   weekly, so entries released after EBI's last scan still get rRNA
+    #   identity. Agrees with the EBI pick on ~99 % of shared chains.
+    #
+    # BGSU wins where both have a family for a chain; EBI fills in the
+    # ~100 chains BGSU omits.
     if no_rfam:
         resolved_rfam: RfamPdbRegionDataset | None = None
     elif rfam_dataset is not None:
@@ -250,7 +274,18 @@ def annotate_pdb(
     else:
         resolved_rfam = _load_rfam_safely(client=client, force_refresh=refresh_rfam)
 
-    rfam_by_chain = get_rfam_mapping_for_pdb(resolved_rfam, pdb_id_upper)
+    if no_bgsu_nr:
+        resolved_bgsu_nr: BgsuNrListDataset | None = None
+    elif bgsu_nr_dataset is not None:
+        resolved_bgsu_nr = bgsu_nr_dataset
+    else:
+        resolved_bgsu_nr = _load_bgsu_nr_safely(client=client, force_refresh=refresh_bgsu_nr)
+
+    rfam_by_chain = _merge_rfam_sources(
+        ebi=get_rfam_mapping_for_pdb(resolved_rfam, pdb_id_upper),
+        bgsu=get_bgsu_rfam_mapping_for_pdb(resolved_bgsu_nr, pdb_id_upper),
+        pdb_id=pdb_id_upper,
+    )
     if rfam_by_chain:
         for assembly in assemblies:
             _apply_rfam_pdb_region(assembly.rna_chains, rfam_by_chain)
@@ -323,6 +358,9 @@ def annotate_many(
     refresh_rfam: bool = False,
     rfam_dataset: RfamPdbRegionDataset | None = None,
     no_rfam: bool = False,
+    refresh_bgsu_nr: bool = False,
+    bgsu_nr_dataset: BgsuNrListDataset | None = None,
+    no_bgsu_nr: bool = False,
     no_fr3d: bool = False,
     client: httpx.Client | None = None,
     **kwargs: Any,
@@ -357,6 +395,13 @@ def annotate_many(
     else:
         resolved_rfam = _load_rfam_safely(client=client, force_refresh=refresh_rfam)
 
+    if no_bgsu_nr:
+        resolved_bgsu_nr: BgsuNrListDataset | None = None
+    elif bgsu_nr_dataset is not None:
+        resolved_bgsu_nr = bgsu_nr_dataset
+    else:
+        resolved_bgsu_nr = _load_bgsu_nr_safely(client=client, force_refresh=refresh_bgsu_nr)
+
     for index, pdb_id in enumerate(pdb_ids_list, start=1):
         logger.info("[batch %d/%d] %s", index, total, pdb_id.upper())
         try:
@@ -368,6 +413,8 @@ def annotate_many(
                     no_raddb=no_raddb,
                     rfam_dataset=resolved_rfam,
                     no_rfam=no_rfam,
+                    bgsu_nr_dataset=resolved_bgsu_nr,
+                    no_bgsu_nr=no_bgsu_nr,
                     no_fr3d=no_fr3d,
                     **kwargs,
                 )
@@ -1097,15 +1144,64 @@ def _load_rfam_safely(
         return None
 
 
+def _load_bgsu_nr_safely(
+    *, client: httpx.Client | None, force_refresh: bool
+) -> BgsuNrListDataset | None:
+    """Best-effort BGSU representative-set load. Returns ``None`` on any failure."""
+    try:
+        metadata = ensure_bgsu_nr_list_available(
+            client=client, force_refresh=force_refresh
+        )
+    except Exception as exc:
+        logger.warning("BGSU representative-set refresh check failed: %s", exc)
+        return None
+    if metadata is None:
+        return None
+    try:
+        return load_bgsu_nr_list_dataset(metadata=metadata)
+    except Exception as exc:
+        logger.warning("BGSU representative-set dataset load failed: %s", exc)
+        return None
+
+
+def _merge_rfam_sources(
+    *,
+    ebi: dict[str, list[str]],
+    bgsu: dict[str, list[str]],
+    pdb_id: str,
+) -> dict[str, list[str]]:
+    """Combine the EBI and BGSU per-chain Rfam maps; BGSU wins on overlap.
+
+    Both inputs are ``{auth_asym_id: [rfam_acc]}``. Disagreements on a
+    shared chain are logged at DEBUG so they can be audited without
+    cluttering normal runs.
+    """
+    merged: dict[str, list[str]] = {chain: list(accs) for chain, accs in ebi.items()}
+    for chain, accs in bgsu.items():
+        previous = merged.get(chain)
+        if previous is not None and previous != accs:
+            logger.debug(
+                "%s chain %s: BGSU Rfam %s overrides EBI %s", pdb_id, chain, accs, previous
+            )
+        merged[chain] = list(accs)
+    if bgsu and not ebi:
+        logger.info(
+            "%s: rRNA Rfam tags supplied by the BGSU representative set only "
+            "(entry absent from the EBI pdb_full_region file)",
+            pdb_id,
+        )
+    return merged
+
+
 def _apply_rfam_pdb_region(
     chains: list[ChainRef], rfam_by_chain: dict[str, list[str]]
 ) -> None:
-    """Replace each chain's ``rfam_accessions`` with the single best-score
-    Rfam from the EBI ``pdb_full_region`` file (when present).
+    """Replace each chain's ``rfam_accessions`` with the single Rfam family
+    from the merged EBI/BGSU flat-file map (when present).
 
-    Chains with no entry in the file keep their existing
-    ``rfam_accessions`` (which may be empty or RCSB-supplied). The file
-    is authoritative when it has a hit — single-best-score selection
+    Chains with no entry in either file keep their existing
+    ``rfam_accessions`` (which may be empty or RCSB-supplied). The files
+    are authoritative when they have a hit — single-family selection
     eliminates the multi-family over-annotation pattern (RF00177 +
     RF01959 + RF01960 on the same chain) that PDBe's REST endpoint
     surfaces.

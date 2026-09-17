@@ -10,6 +10,7 @@ the chain assignments and tRNA states are deterministic.
 from __future__ import annotations
 
 import gzip
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,11 @@ import respx
 from ribosome_state_annotator import api
 from ribosome_state_annotator import constants as C
 from ribosome_state_annotator.bgsu_client import BGSU_CORRESPONDENCE_URL, DEFAULT_BGSU_RETRIES
+from ribosome_state_annotator.bgsu_nr_list import (
+    BGSU_NR_CURRENT_RELEASE_URL,
+    BgsuNrListDataset,
+    BgsuNrListMetadata,
+)
 from ribosome_state_annotator.cache import Cache
 from ribosome_state_annotator.coordinates import RCSB_ASSEMBLY_DOWNLOAD_TEMPLATE
 from ribosome_state_annotator.rcsb_client import RCSB_GRAPHQL_URL
@@ -191,11 +197,17 @@ def _install_mocks(
     rfam_route = respx.route(url=RFAM_PDB_REGION_URL).mock(
         return_value=httpx.Response(404)
     )
+    # Likewise the BGSU representative-set release page: 404 keeps the
+    # weekly-refresh path offline in tests.
+    nrlist_route = respx.route(url=BGSU_NR_CURRENT_RELEASE_URL).mock(
+        return_value=httpx.Response(404)
+    )
     return {
         "rcsb": rcsb_route,
         "bgsu": bgsu_route,
         "coord": coord_route,
         "rfam": rfam_route,
+        "nrlist": nrlist_route,
     }
 
 
@@ -671,3 +683,64 @@ def test_bgsu_timeout_kwarg_is_threaded_to_request(
     api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True, no_raddb=True, bgsu_timeout=77.0)
     assert routes["bgsu"].called
     assert routes["bgsu"].calls.last.request.extensions["timeout"]["read"] == 77.0
+
+
+# ---------------------------------------------------------------------------
+# Rfam sources — BGSU representative set fills in entries EBI's file lacks
+# ---------------------------------------------------------------------------
+
+
+def _bgsu_nr_dataset(mapping: dict[tuple[str, str], str]) -> BgsuNrListDataset:
+    return BgsuNrListDataset(
+        metadata=BgsuNrListMetadata(
+            source_url="fixture",
+            downloaded_at=datetime(2026, 9, 17, tzinfo=timezone.utc),
+            release="4.57",
+            release_date="2026-09-16",
+        ),
+        lookup=mapping,
+    )
+
+
+@respx.mock
+def test_annotate_pdb_uses_bgsu_nr_list_when_entry_has_no_rfam_tags(
+    ribosome_fixture: gemmi.Structure, tmp_path: Path
+) -> None:
+    """Post-May-2026 deposits (28UI, 9Q3Q) carry no Rfam tags from RCSB or
+    the EBI file; the BGSU representative set alone must rescue them."""
+    cif_bytes = _ribosome_cif_bytes(ribosome_fixture, tmp_path)
+    entry = _bacterial_entry_payload()
+    for inst in entry["assemblies"][0]["polymer_entity_instances"]:
+        inst["polymer_entity"]["rcsb_polymer_entity_annotations"] = []
+    _install_mocks(entry_payload=entry, cif_bytes=cif_bytes)
+
+    # Without any Rfam source the assembly is a partial ribosome.
+    bare = api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True, no_bgsu_nr=True)[0]
+    assert bare.status == "skipped"
+    assert bare.skip_reason == C.SKIP_PARTIAL_MISSING_SSU_OR_LSU
+
+    dataset = _bgsu_nr_dataset(
+        {
+            (FIXTURE_PDB_ID.lower(), "S"): "RF00177",
+            (FIXTURE_PDB_ID.lower(), "L"): "RF02541",
+            (FIXTURE_PDB_ID.lower(), "TA"): "RF00005",
+        }
+    )
+    ann = api.annotate_pdb(FIXTURE_PDB_ID, no_cache=True, bgsu_nr_dataset=dataset)[0]
+    assert ann.status == "annotated"
+    assert ann.ribosome_classification == "bacterial_ribosome"
+    assert [c.auth_asym_id for c in ann.ssu_main_rrna_chains] == ["S"]
+    assert [c.auth_asym_id for c in ann.lsu_main_rrna_chains] == ["L"]
+    assert ann.classification_evidence["ssu_rfam"] == ["RF00177"]
+    assert ann.aminoacyl_trna_chain is not None and ann.aminoacyl_trna_chain.auth_asym_id == "TA"
+    assert ann.aminoacyl_trna_chain.rfam_accessions == ["RF00005"]
+
+
+def test_merge_rfam_sources_bgsu_wins_and_ebi_fills_gaps() -> None:
+    merged = api._merge_rfam_sources(
+        ebi={"A": ["RF01959"], "d": ["RF00001"]},
+        bgsu={"A": ["RF00177"], "a": ["RF02541"]},
+        pdb_id="TEST",
+    )
+    assert merged == {"A": ["RF00177"], "a": ["RF02541"], "d": ["RF00001"]}
+    assert api._merge_rfam_sources(ebi={}, bgsu={}, pdb_id="TEST") == {}

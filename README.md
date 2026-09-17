@@ -103,15 +103,19 @@ phylogenetically conserved positions across all of biology. The
 package leverages this conservation through a four-stage pipeline:
 
 1. **Retrieve and classify.** Entry metadata is pulled from the RCSB
-   GraphQL API, augmented with Rfam mappings from the EBI
-   `pdb_full_region.txt.gz` flat file (locally cached, weekly refresh
-   — see [`Rfam pdb_full_region`](#rfam-pdb_full_region-mapping) below).
-   For each rRNA chain the package picks the **single highest
-   bit-score** Rfam accession from the file; cross-family HMM hits
-   (e.g. bacterial 16S + archaeal SSU + eukaryotic 18S all matching
-   one chain) collapse to the one biologically-correct family. The
-   assembly is then classified as bacterial, eukaryotic cytoplasmic,
-   or eukaryotic organellar.
+   GraphQL API, augmented with per-chain Rfam families from two
+   locally cached, weekly-refreshed flat files: the BGSU RNA 3D Hub
+   representative-set CSV (see
+   [`BGSU representative set`](#bgsu-representative-set-rfam-mapping)
+   below) and the EBI `pdb_full_region.txt.gz` file (see
+   [`Rfam pdb_full_region`](#rfam-pdb_full_region-mapping)). BGSU
+   ships a new release every week, so entries deposited after EBI's
+   last Rfam scan still get rRNA identity; EBI fills in the few chains
+   BGSU omits. For each rRNA chain the package keeps a **single** Rfam
+   accession; cross-family HMM hits (e.g. bacterial 16S + archaeal SSU
+   + eukaryotic 18S all matching one chain) collapse to the one
+   biologically-correct family. The assembly is then classified as
+   bacterial, eukaryotic cytoplasmic, or eukaryotic organellar.
 2. **Project reference anchors.** Curated functional-site
    nucleotides from a reference ribosome are mapped onto the query
    rRNA via the BGSU RNA correspondence API, which uses Rfam-based
@@ -175,6 +179,7 @@ flowchart TD
     %% External data sources
     RCSB[("RCSB<br/>GraphQL")]:::source
     RfamFile[("EBI Rfam<br/>pdb_full_region.txt.gz<br/>refreshed weekly")]:::source
+    NRList[("BGSU representative set<br/>full CSV (Rfam per chain)<br/>refreshed weekly")]:::source
     BGSU[("BGSU RNA 3D Hub<br/>correspondence")]:::source
     Coords[("RCSB Files<br/>biological-assembly mmCIF")]:::source
     RADdb[("RADdb LSU↔SSU CSV<br/>refreshed weekly")]:::source
@@ -201,6 +206,7 @@ flowchart TD
     Input --> Fetch
     RCSB --> Fetch
     RfamFile --> Fetch
+    NRList --> Fetch
 
     Fetch -->|per biological assembly| Classify
     Classify -->|unsupported| Skip
@@ -521,17 +527,17 @@ The following are out of scope for v1:
 
 All external API responses are cached on disk at
 `~/.cache/ribosome-state-annotator/` (overridable with `--cache-dir`;
-disabled with `--no-cache`). The cache contains eight namespaces:
-`rcsb/`, `bgsu/`, `pdbe/`, `coords/`, `fr3d/`, `ccd/`, `raddb/`, and
-`rfam/`. The first six are content-addressed per-entry and never
+disabled with `--no-cache`). The cache contains nine namespaces:
+`rcsb/`, `bgsu/`, `pdbe/`, `coords/`, `fr3d/`, `ccd/`, `raddb/`,
+`rfam/`, and `bgsu_nr/`. The first six are content-addressed per-entry and never
 expire; to refresh, invoke `ribostate cache clear` or delete the cache
 directory. The `ccd/` namespace stores per-component PDB Chemical
 Component Dictionary CIFs, fetched lazily on first encounter with a
 modified nucleotide whose definition is incomplete in Gemmi's
 built-in tabulated dictionary (e.g. `U8U` =
 5-methylaminomethyl-2-thiouridine, a *Thermus* tRNA wobble-position
-modification). The `raddb/` and `rfam/` namespaces hold a single
-weekly-refreshed dataset each (see below).
+modification). The `raddb/`, `rfam/`, and `bgsu_nr/` namespaces hold a
+single weekly-refreshed dataset each (see below).
 
 ### RADdb large-scale movements
 
@@ -588,7 +594,38 @@ forced immediately with `ribostate rfam refresh` or with
 The current cached state is reported by `ribostate rfam info`. The
 integration is best-effort: every failure mode (no cache, stale cache
 + offline, malformed file) leaves the rRNA chains with whatever Rfam
-tags RCSB supplied directly.
+tags the BGSU representative set (below) or RCSB supplied.
+
+EBI regenerates this file irregularly and it can lag PDB releases by
+months (the May 2026 build covered nothing released after 13 May
+2026), which is why the BGSU representative set is consulted as well.
+
+### BGSU representative set Rfam mapping
+
+The `bgsu_nr/` namespace stores a gzipped copy of the "full" CSV
+export of the current
+[BGSU RNA 3D Hub representative set](https://rna.bgsu.edu/rna3dhub/nrlist)
+(also called the NR list), downloaded from
+`https://rna.bgsu.edu/rna3dhub/nrlist/download/rna/<release>/all/csv/full`
+alongside a `metadata.json` sidecar recording the release number and
+date. The file has one row per IFE (one chain, or several `+`-joined
+chains) and a `rfam` column naming the Rfam family each chain maps to,
+either from Rfam's own PDB mapping or from BGSU running cmsearch on
+the chain sequence against Rfam covariance models. Composite IFEs
+(`A+B` with `RF02543+RF00002`) are split positionally; `NA` means no
+family. On the chains both sources cover, BGSU's family matches EBI's
+best-score pick 98.8 % of the time.
+
+BGSU publishes a new release every week, so entries deposited after
+EBI's last scan are covered within days. Where both files name a
+family for a chain, BGSU wins; EBI fills in the small number of chains
+BGSU omits. The refresh policy mirrors the Rfam file: after seven
+days the release page is checked and the CSV re-downloaded only when
+the release number has changed. Force a check with
+`ribostate nrlist refresh` or `--refresh-nrlist` on `annotate` /
+`annotate-batch`; inspect the cache with `ribostate nrlist info`.
+Library callers can pass `no_bgsu_nr=True` to `annotate_pdb` to
+disable the source.
 
 ### tRNA–mRNA codon/anticodon evidence (FR3D)
 
@@ -653,11 +690,12 @@ implements one stage of the contact-transfer workflow described above.
 | File | Responsibility |
 |------|----------------|
 | `api.py` | Top-level orchestration. Defines `annotate_pdb`, `annotate_assembly`, and `annotate_many` — the primary entry points for library callers. |
-| `cli.py` | Typer-based command-line interface (`ribostate annotate`, `annotate-batch`, `cache`, `raddb`). |
+| `cli.py` | Typer-based command-line interface (`ribostate annotate`, `annotate-batch`, `cache`, `raddb`, `rfam`, `nrlist`). |
 | `models.py` | Pydantic v2 data models: `ChainRef`, `LigandRef`, `AssemblyContext`, `CorrespondenceResult`, `RibosomeAnnotation`. All JSON and CSV output is round-tripped through these. |
 | `constants.py` | Curated reference unit IDs (`BACTERIAL_REFERENCE_UNITS` for 5J7L; `YEAST_REFERENCE_UNITS` for 7ZW0) — the functional-site anchors. |
 | `rcsb_client.py` | RCSB GraphQL client and assembly parser. Reads `assemblies → polymer_entity_instances` and produces per-assembly `AssemblyContext` records. |
 | `rfam_pdb_region.py` | Cache + parse the EBI `pdb_full_region.txt.gz` flat file; selects the single best-score Rfam accession per `(pdb_id, chain)`. Replaces the previous PDBe REST per-entry lookup. |
+| `bgsu_nr_list.py` | Cache + parse the weekly BGSU representative-set "full" CSV; one Rfam family per `(pdb_id, chain)`, composite IFEs split positionally. Covers entries EBI's Rfam scan has not reached yet. |
 | `bgsu_client.py` | BGSU correspondence HTTP client and tolerant JSON parser. Handles both the live `mappings` and the idealised `alignment` response shapes. |
 | `correspondence.py` | PDB-prefix and assembly-chain filtering, including the multi-assembly chain-substitution fallback. |
 | `coordinates.py` | mmCIF download and Gemmi parsing. Caches under `coords/`. |

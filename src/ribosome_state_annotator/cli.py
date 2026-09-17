@@ -18,6 +18,13 @@ from rich.table import Table
 from ribosome_state_annotator import __version__
 from ribosome_state_annotator.api import annotate_many, annotate_pdb
 from ribosome_state_annotator.bgsu_client import DEFAULT_BGSU_TIMEOUT
+from ribosome_state_annotator.bgsu_nr_list import (
+    ensure_bgsu_nr_list_available,
+    get_local_bgsu_nr_file_path,
+    get_local_bgsu_nr_metadata_path,
+    list_bgsu_nr_files,
+    load_bgsu_nr_metadata,
+)
 from ribosome_state_annotator.cache import Cache
 from ribosome_state_annotator.coordinates import CoordinateSource
 from ribosome_state_annotator.models import RibosomeAnnotation
@@ -74,8 +81,15 @@ raddb_app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+nrlist_app = typer.Typer(
+    name="nrlist",
+    help="Inspect or refresh the cached BGSU representative-set (NR list) Rfam table.",
+    no_args_is_help=True,
+)
+
 app.add_typer(raddb_app, name="raddb")
 app.add_typer(rfam_app, name="rfam")
+app.add_typer(nrlist_app, name="nrlist")
 
 stdout_console = Console()
 
@@ -403,6 +417,13 @@ def annotate(
             help="Force an online check for a newer Rfam pdb_full_region file (default: refresh weekly).",
         ),
     ] = False,
+    refresh_bgsu_nr: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-nrlist",
+            help="Force an online check for a newer BGSU representative-set release (default: refresh weekly).",
+        ),
+    ] = False,
     summary: Annotated[
         bool,
         typer.Option(
@@ -438,6 +459,7 @@ def annotate(
         local_coordinate_path=local_path,
         refresh_raddb=refresh_raddb,
         refresh_rfam=refresh_rfam,
+        refresh_bgsu_nr=refresh_bgsu_nr,
         bgsu_timeout=timeout,
     )
     _emit_annotations(
@@ -526,6 +548,13 @@ def annotate_batch(
             help="Force an online check for a newer Rfam pdb_full_region file (default: refresh weekly).",
         ),
     ] = False,
+    refresh_bgsu_nr: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-nrlist",
+            help="Force an online check for a newer BGSU representative-set release (default: refresh weekly).",
+        ),
+    ] = False,
     summary: Annotated[
         bool,
         typer.Option(
@@ -562,6 +591,7 @@ def annotate_batch(
         strict_complete_check=strict,
         refresh_raddb=refresh_raddb,
         refresh_rfam=refresh_rfam,
+        refresh_bgsu_nr=refresh_bgsu_nr,
         bgsu_timeout=timeout,
     )
     _emit_annotations(
@@ -596,7 +626,8 @@ def cache_info(
     raddb_files = list_raddb_files(cache.root)
     rfam_bytes = list_rfam_files(cache.root)
     rfam_count = 1 if rfam_bytes > 0 else 0
-    if not info.exists and raddb_files == 0 and rfam_count == 0:
+    nrlist_count = 1 if list_bgsu_nr_files(cache.root) > 0 else 0
+    if not info.exists and raddb_files == 0 and rfam_count == 0 and nrlist_count == 0:
         table.add_row("status", "[yellow]missing[/yellow]")
     else:
         table.add_row("rcsb", str(info.rcsb_entries))
@@ -607,9 +638,10 @@ def cache_info(
         table.add_row("ccd", str(info.ccd_entries))
         table.add_row("raddb", str(raddb_files))
         table.add_row("rfam", str(rfam_count))
+        table.add_row("bgsu_nr", str(nrlist_count))
         table.add_row(
             "[bold]total entries",
-            f"[bold]{info.total_entries + raddb_files + rfam_count}[/bold]",
+            f"[bold]{info.total_entries + raddb_files + rfam_count + nrlist_count}[/bold]",
         )
         table.add_row("total bytes", f"{info.total_bytes:,}")
     stdout_console.print(table)
@@ -732,6 +764,58 @@ def rfam_refresh(
     _err(
         f"[green]Rfam pdb_full_region ready at {get_local_rfam_file_path()} "
         f"(Last-Modified={metadata.last_modified})[/green]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# nrlist info / nrlist refresh
+# ---------------------------------------------------------------------------
+
+
+@nrlist_app.command("info")
+def nrlist_info() -> None:
+    """Show the cached BGSU representative-set file location, release, and timestamp."""
+    metadata = load_bgsu_nr_metadata()
+    file_path = get_local_bgsu_nr_file_path()
+    meta_path = get_local_bgsu_nr_metadata_path()
+    table = Table(title="BGSU representative-set (NR list) cache")
+    table.add_column("Field")
+    table.add_column("Value")
+    if metadata is None:
+        table.add_row("status", "[yellow]not cached[/yellow]")
+        table.add_row("file_path", str(file_path))
+        table.add_row("metadata_path", str(meta_path))
+    else:
+        table.add_row("release", metadata.release)
+        table.add_row("release_date", metadata.release_date or "(unknown)")
+        table.add_row("downloaded_at", metadata.downloaded_at.replace(microsecond=0).isoformat())
+        table.add_row("source_url", metadata.source_url)
+        table.add_row("file_path", str(file_path))
+        if file_path.is_file():
+            table.add_row("file_bytes", f"{file_path.stat().st_size:,}")
+        else:
+            table.add_row("file_bytes", "[red]missing[/red]")
+    stdout_console.print(table)
+
+
+@nrlist_app.command("refresh")
+def nrlist_refresh(
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Check BGSU for a newer release even if the cache is fresh."),
+    ] = False,
+) -> None:
+    """Check BGSU for a newer representative-set release and download if changed."""
+    _configure_logging(quiet=False, debug=False)
+    metadata = ensure_bgsu_nr_list_available(force_refresh=force)
+    if metadata is None:
+        _err(
+            "[red]BGSU representative set unavailable: download failed and no cached file is present[/red]"
+        )
+        raise typer.Exit(code=1)
+    _err(
+        f"[green]BGSU representative set {metadata.release} ready at {get_local_bgsu_nr_file_path()} "
+        f"(released {metadata.release_date or 'unknown date'})[/green]"
     )
 
 
